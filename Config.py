@@ -54,6 +54,7 @@ class Config:
         self.q = q = num_bit_lines
         self.R_min, self.R_max = R_min, R_max
         self.R_wire, self.R_source, self.R_load = R_wire, R_source, R_load
+        self.E_range, self.seed = tuple(E_range), seed
         self.E = np.random.default_rng(seed).uniform(*E_range, size=p)
 
         self.num_nodes = 2 * p * q
@@ -92,6 +93,12 @@ class Config:
         # Source EMF in series with each branch, nonzero only on sources: i = (v - emf) / R_source.
         self.emf = np.zeros(self.num_branches)
         self.emf[self.slices[BranchKind.SOURCE]] = self.E
+
+    def params(self):
+        """The scalar parameters that, passed back to Config(...), regenerate this circuit."""
+        return dict(num_word_lines=self.p, num_bit_lines=self.q, R_min=self.R_min, R_max=self.R_max,
+                    R_wire=self.R_wire, R_source=self.R_source, R_load=self.R_load,
+                    E_range=list(self.E_range), seed=self.seed)
 
     def word_node(self, r, c):
         """Index of node w[r, c]; accepts arrays."""
