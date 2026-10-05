@@ -8,6 +8,9 @@ from Config import Config
 CONVERGED = "converged"
 NOT_CONVERGED = "not_converged"
 ERROR = "error"
+# Only in run records: the solver's process died, or ran past the time limit, before returning a Result.
+CRASHED = "crashed"
+TIMEOUT = "timeout"
 
 
 @dataclass

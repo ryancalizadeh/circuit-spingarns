@@ -1,2 +1,3 @@
 - [Working feedback style](working-feedback-style.md) — user wants running narration: what's being checked, what broke, what was tried, how it went
 - [Project goals](project-goals.md) — compare SPICE and the custom Spingarn partial-inverses algorithm on non-ideal memristive crossbar arrays, especially scaling and convergence at large sizes
+- [ngspice baseline findings](ngspice-baseline-findings.md) — transient-op fallback fakes success, ITL1 floor of 100, SPARSE vs KLU scaling, flat 4 Newton iterations, memory at scale

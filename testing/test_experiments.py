@@ -1,4 +1,5 @@
 import json
+import os
 import pickle
 import sys
 import tempfile
@@ -39,6 +40,21 @@ class FakeCrashing(Solver):
         raise RuntimeError("singular matrix")
 
 
+class FakeProcessDeath(Solver):
+    """Kills its own process mid-solve, as the OS does to a process that runs out of memory."""
+    name = "fake_death"
+
+    def solve(self, cfg):
+        os._exit(3)
+
+
+class FakeHang(Solver):
+    name = "fake_hang"
+
+    def solve(self, cfg):
+        time.sleep(600)
+
+
 def test_parse_size():
     assert parse_size("64") == (64, 64)
     assert parse_size("16x32") == (16, 32)
@@ -48,9 +64,47 @@ def test_parse_size():
 def sweep(out):
     sizes, runs = [(4, 4), (8, 8), (8, 16)], 3
     solvers = [FakeConverging(), FakeStalling(max_iterations=50), FakeCrashing()]
-    summaries = run_sweep(sizes, runs, solvers, out, base_seed=10)
+    summaries = run_sweep(sizes, runs, solvers, out, base_seed=10, isolate=False)
     rows = make_plots(out, [s.name for s in solvers])
     return sizes, runs, solvers, summaries, rows
+
+
+def test_isolated_runs_survive_crashes_and_hangs():
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp)
+        start = time.perf_counter()
+        summaries = run_sweep([(3, 3)], 1, [FakeConverging(), FakeProcessDeath(), FakeHang()], out, timeout=20)
+        assert time.perf_counter() - start < 120
+        status = {s["algorithm"]: s for s in summaries}
+        assert status["fake_ok"]["status"] == "converged" and status["fake_ok"]["iterations"] == 13
+        assert status["fake_death"]["status"] == "crashed" and "exited with code 3" in status["fake_death"]["error"]
+        assert status["fake_hang"]["status"] == "timeout"
+        # failure records have the same shape as normal ones, and are in the checkpoint
+        assert set(status["fake_death"]) == set(status["fake_ok"]) == set(status["fake_hang"])
+        assert status["fake_death"]["config"] == status["fake_ok"]["config"]
+        assert [json.loads(line)["status"] for line in open(out / "runs.jsonl")] == ["converged", "crashed", "timeout"]
+        rows = {r["algorithm"]: r for r in json.load(open(out / "summary.json"))}
+        assert rows["fake_death"]["crashed"] == 1 and rows["fake_hang"]["timeouts"] == 1
+        # the child process pickled the full result, and nothing half-written is left
+        with open(out / "pickles" / "fake_ok_3x3_seed0.pkl", "rb") as f:
+            assert pickle.load(f).v.shape == (27,)
+        assert sorted(p.name for p in (out / "pickles").iterdir()) == ["fake_ok_3x3_seed0.pkl"]
+
+
+def test_resume_skips_recorded_runs():
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp)
+        first = run_sweep([(2, 2)], 2, [FakeConverging()], out, isolate=False)
+        try:
+            run_sweep([(2, 2)], 2, [FakeConverging()], out, isolate=False)
+            assert False, "overwrote existing records without resume"
+        except FileExistsError:
+            pass
+        second = run_sweep([(2, 2), (4, 4)], 2, [FakeConverging()], out, isolate=False, resume=True)
+        assert [(s["p"], s["seed"]) for s in first] == [(2, 0), (2, 1)]
+        assert [(s["p"], s["seed"]) for s in second] == [(4, 0), (4, 1)]
+        assert len(open(out / "runs.jsonl").readlines()) == 4
+        assert "resumed" in json.load(open(out / "experiment.json"))
 
 
 def test_sweep_records_saves_and_plots():

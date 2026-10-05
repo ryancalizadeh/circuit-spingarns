@@ -45,6 +45,8 @@ def summarize(runs):
             runs=len(rs), converged=len(ok),
             not_converged=sum(r["status"] == "not_converged" for r in rs),
             errors=sum(r["status"] == "error" for r in rs),
+            crashed=sum(r["status"] == "crashed" for r in rs),
+            timeouts=sum(r["status"] == "timeout" for r in rs),
             runtime_mean=float(rt.mean()) if ok else None, runtime_std=float(rt.std()) if ok else None,
             iterations_mean=float(it.mean()) if ok else None, iterations_std=float(it.std()) if ok else None,
         ))
