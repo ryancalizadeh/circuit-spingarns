@@ -1,3 +1,4 @@
 PySpice
 numpy
+scipy
 matplotlib
