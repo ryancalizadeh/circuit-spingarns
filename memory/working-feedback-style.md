@@ -10,6 +10,6 @@ metadata:
 
 While working through a multi-step task, narrate progress between tool calls: what is being verified and why, each problem as it appears, the fix attempted, and the measured outcome. Stated 2026-09-21 ("Keep me updated as you work, let me know what problems come up, what you try to overcome them, and how that goes").
 
-**Why:** the user makes design calls mid-task (e.g. rejected the `|dz|` stop rule and the rho ramp on theoretical grounds as soon as the stall was reported, see [[rho-schedule-preference]]); they need the evidence as it arrives, not after.
+**Why:** the user makes design calls mid-task (e.g. shown the device-Gamma iteration counts, chose to register both matchings as solvers, see [[spingarn-solver-findings]]); they need the evidence as it arrives, not after.
 
 **How to apply:** short status messages with numbers before and after each investigation step; surface any deviation from a plan or from theory immediately and let the user decide rather than quietly working around it.

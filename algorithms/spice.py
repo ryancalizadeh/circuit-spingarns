@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 from PySpice.Spice.NgSpice.Shared import NgSpiceCommandError, NgSpiceShared
 
-from algorithms.common import Solver, SolveOutput
+from algorithms.common import Solver, SolveOutput, kcl_check
 
 # PySpice logs every ngspice stderr line that is not a "Warning:" as an error, including routine notes such as
 # "Starting dynamic gmin stepping", and warns that ngspice 47 is unsupported although the parts of the shared-library
@@ -31,7 +31,7 @@ def ngspice():
     global _ngspice
     if _ngspice is None:
         # cffi does not search the DLL's own folder for its dependencies (libomp140, sndfile, samplerate).
-        dll_dir = Path(NgSpiceShared.LIBRARY_PATH).parent
+        dll_dir = Path(NgSpiceShared.LIBRARY_PATH).parent # type: ignore
         if hasattr(os, "add_dll_directory") and dll_dir.is_absolute() and dll_dir.is_dir():
             os.add_dll_directory(str(dll_dir))
         _ngspice = NgSpiceShared.new_instance()
@@ -61,21 +61,6 @@ def node_names(cfg):
     """SPICE names of Config's nodes, in Config's node order: word nodes, then bit nodes, each row-major."""
     p, q = cfg.p, cfg.q
     return [f"w{r}_{c}" for r in range(p) for c in range(q)] + [f"b{r}_{c}" for r in range(p) for c in range(q)]
-
-
-def kcl_check(cfg, u, reltol, abstol):
-    """
-    Branch voltages and currents implied by node potentials `u`, and whether they satisfy KCL at every node to SPICE's
-    own current tolerance: |sum of currents| <= reltol * (sum of |currents|) + abstol. Currents come from the exact
-    branch laws, so the residual measures how far `u` is from a true DC solution.
-    """
-    A = cfg.incidence()
-    v = A.T @ u
-    i = cfg.current(v)
-    residual = np.abs(A @ i)
-    scale = abs(A) @ np.abs(i)
-    ok = bool(np.all(residual <= reltol * scale + abstol))
-    return v, i, ok, float(residual.max()), float(np.max(residual / np.maximum(scale, abstol)))
 
 
 # ngspice's notes when a fallback for the operating point succeeds; plain Newton prints none.

@@ -23,6 +23,22 @@ class SolveOutput:
     history: dict = field(default_factory=dict)
 
 
+def kcl_check(cfg, u, reltol, abstol, A=None):
+    """
+    Branch voltages and currents implied by node potentials `u`, and whether they satisfy KCL at every node to SPICE's
+    own current tolerance: |sum of currents| <= reltol * (sum of |currents|) + abstol. Currents come from the exact
+    branch laws, so the residual measures how far `u` is from a true DC solution. Every solver's answer is judged by
+    this test. A is cfg's incidence matrix, if already built.
+    """
+    A = cfg.incidence() if A is None else A
+    v = A.T @ u
+    i = cfg.current(v)
+    residual = np.abs(A @ i)
+    scale = abs(A) @ np.abs(i)
+    ok = bool(np.all(residual <= reltol * scale + abstol))
+    return v, i, ok, float(residual.max()), float(np.max(residual / np.maximum(scale, abstol)))
+
+
 class Solver(ABC):
     """
     Base class for a circuit solver. Subclasses set `name` and implement `solve`.
