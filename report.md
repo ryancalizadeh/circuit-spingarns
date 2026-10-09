@@ -273,7 +273,7 @@ With $R_{min} = R_{max}$, every branch is matched and the contraction bound is 0
    - restrict the resolvent's Newton loop to unconverged entries.
 
    Expected gain is about 2× per iteration at mid sizes, which matters mainly for `spingarn_sector`.
-6. **Better orderings or factorizations.** *Done 2026-10-08, see §6:* CHOLMOD (through cvxopt, as scikit-sparse has no Windows wheel) in a geometric nested-dissection ordering. Multithreading turned out to slow CHOLMOD down on the current machine (§6.4).
+6. **Better orderings or factorizations.** *Done 2026-10-08, see §6:* CHOLMOD (through cvxopt, as scikit-sparse has no Windows wheel) in a geometric nested-dissection ordering. Multithreading turned out to slow CHOLMOD down on the laptop (§6.4; not on the PC, §7.3).
 7. **2048×2048 is untested.** Expect about 18 GB and about 4 min of factorization. SuperLU's 32-bit indices may become a hard limit near 2 billion stored nonzeros. This is the size where SPICE is expected to run out of memory, so it is the most interesting point for the project's hypothesis.
 
 ### 4.3 Generality
@@ -319,7 +319,7 @@ What the 10 tests cover:
 
 ## 6. Cholesky and geometric nested dissection (2026-10-08)
 
-*Measured on an 8-core laptop (Intel Core Ultra 7 256V: 4 performance and 4 low-power cores, 15.5 GB RAM), not on the 32 GB machine of §3, so runtimes and memory here are not comparable with §3's. SPICE is not part of this comparison: ngspice is not installed on this machine, by your choice.*
+*Measured on an 8-core laptop (Intel Core Ultra 7 256V: 4 performance and 4 low-power cores, 15.5 GB RAM), not on the 32 GB machine of §3, so runtimes and memory here are not comparable with §3's. SPICE is not part of this comparison: ngspice is not installed on the laptop, by your choice.*
 
 ### 6.1 What changed
 
@@ -330,7 +330,7 @@ What the 10 tests cover:
   - `factorization`: `"cholmod"` or `"slu"`;
   - `ordering`: `"nested_dissection"`, or `"builtin"` for the library's own;
   - `blas_threads`: default 1 (§6.4).
-- **Why cvxopt.** SciPy 1.18 has no sparse Cholesky. scikit-sparse, the usual CHOLMOD binding, ships only a source package for Windows, and this machine has no C compiler. cvxopt 1.3.3 ships a Python 3.14 Windows wheel that contains CHOLMOD (SuiteSparse 7.11, 64-bit indices) and its own OpenBLAS, and it accepts a user permutation.
+- **Why cvxopt.** SciPy 1.18 has no sparse Cholesky. scikit-sparse, the usual CHOLMOD binding, ships only a source package for Windows, and the laptop has no C compiler. cvxopt 1.3.3 ships a Python 3.14 Windows wheel that contains CHOLMOD (SuiteSparse 7.11, 64-bit indices) and its own OpenBLAS, and it accepts a user permutation.
 - **New run history fields:**
   - `ordering_time`, `factor_time`, `ordering_used` and `blas_threads`;
   - for CHOLMOD, also `cholmod_ordering` and `lnz`, the exact nonzeros of $L$.
@@ -371,7 +371,7 @@ Implemented in [algorithms/ordering.py](algorithms/ordering.py).
 
 ### 6.4 BLAS threads
 
-cvxopt's OpenBLAS uses every core by default, and on this machine that made CHOLMOD several times slower. Numeric factorization with AMD, one process per thread count, 3 repeats:
+cvxopt's OpenBLAS uses every core by default, and on the laptop that made CHOLMOD several times slower. Numeric factorization with AMD, one process per thread count, 3 repeats:
 
 | size | 1 thread | 2 | 4 | 8 (default) |
 |---|---|---|---|---|
@@ -455,10 +455,10 @@ All 96 runs converged in 5 iterations. Answers agree across backends to about 3e
 
 1. **The factorization is no longer the bottleneck.** At 1024×1024, `spingarn` spends 1.9 s factorizing and about 3.0 s in its 5 iterations. An iteration takes 591 ms, of which the triangular solve is only about 136 ms (§6.3). §4.2 item 5, the per-iteration overhead, is now the bigger lever, above all for `spingarn_sector` with its ~91 iterations.
 2. **2048×2048 now looks feasible here.** It wasn't run, since you chose to stop at 1024. Extrapolating the measured growth in peak memory from 512 to 1024 (3.6× for CHOLMOD/GNDO, 4.3× for SuperLU/MMD per 4× nodes):
-   - CHOLMOD/GNDO would need about 8 GB, which fits in this machine's 15.5 GB;
+   - CHOLMOD/GNDO would need about 8 GB, which fits in the laptop's 15.5 GB;
    - SuperLU/MMD would need about 18 GB, matching §4.2 item 7's projection.
-3. **The SPICE comparison is still to do.** It needs ngspice on this machine, since §3's SPICE numbers come from the other machine. *(Done on the desktop on 2026-10-09: see §7.)*
-4. **Re-check the thread default on other hardware.** It was measured on this laptop's mix of fast and slow cores.
+3. **The SPICE comparison is still to do.** It needs ngspice on the laptop, since §3's SPICE numbers come from the other machine. *(Done on the PC on 2026-10-09: see §7.)*
+4. **Re-check the thread default on other hardware.** It was measured on the laptop's mix of fast and slow cores.
 5. **Compare `factor_nnz` only within one library.** It counts $L$ and $U$ for SuperLU but $L$ alone for CHOLMOD. Across libraries, compare `lnz` (CHOLMOD only) or peak memory.
 
 ### 6.7 Files changed (2026-10-08)
@@ -552,7 +552,7 @@ Numeric factorization with AMD, one process per thread count, 3 repeats (the mea
 | 512×512 | 0.434–0.450 s | 0.416–0.422 s | 0.376–0.385 s | 0.383–0.387 s | 0.434–0.437 s |
 | 1024×1024 | 3.02–3.17 s | 3.12–3.63 s | 2.46–2.84 s | 2.33–2.40 s | 2.44–2.49 s |
 
-- **Threads help here, a little, on large arrays.** At 1024, 6 threads factorize 1.3× faster than 1. On the laptop, all 8 threads were 2–10× *slower*. Every core here is the same kind, which supports §6.4's explanation: work landing on the laptop's low-power cores.
+- **Threads help on the PC, a little, on large arrays.** At 1024, 6 threads factorize 1.3× faster than 1. On the laptop, all 8 threads were 2–10× *slower*. Every core on the PC is the same kind, which supports §6.4's explanation: work landing on the laptop's low-power cores.
 - **Small arrays still prefer 1 thread.** At 256, every extra thread slows the factorization.
 - **With GNDO, threads barely matter.** In the sweeps (1 thread ÷ more threads, at 1024):
   - AMD on 6 threads: factorization 1.33×, total 1.14×;
@@ -622,7 +622,7 @@ Numeric factorization with AMD, one process per thread count, 3 repeats (the mea
 ### 7.6 Next steps
 
 1. **Decide how to present the 1024 failure.** It is real for the standard ngspice-47 Windows build, but it is an implementation limit, not a convergence failure. Before claiming that SPICE fails at scale, a 64-bit KLU build of ngspice (or Xyce) would tell whether SPICE merely becomes very slow.
-2. **2048×2048 with Spingarn.** At 1024, `spingarn` peaks at 2.1 GB, so on this 32 GB machine 2048 should fit easily (§6.6 estimates ~8 GB).
+2. **2048×2048 with Spingarn.** At 1024, `spingarn` peaks at 2.1 GB, so on the 32 GB PC 2048 should fit easily (§6.6 estimates ~8 GB).
 3. **Per-iteration overhead** remains the main lever for `spingarn` (§6.6 item 1): at 1024, its 5 iterations take 2.4 s, against 1.9 s for the factorization.
 
 ### 7.7 Files changed (2026-10-09)

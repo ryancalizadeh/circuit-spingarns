@@ -4,4 +4,4 @@
 - [Spingarn solver findings](spingarn-solver-findings.md) — iterations flat 1x1→1024x1024 (5 r_lo / ~90 geometric); since 2026-10-08 CHOLMOD + geometric nested dissection is the default (6.2x faster than legacy SuperLU `spingarn_slu` at 1024), per-iteration overhead now dominates
 - [Python environment](python-environment.md) — use venv/ (numpy, scipy, matplotlib, PySpice, cvxopt for CHOLMOD); ngspice works on the desktop, not installed on the laptop; cvxopt quirks
 - [Prior work](prior-work.md) — the wave-digital Scattering Iterative Method (Bernardini et al. 2018) is essentially this algorithm; position novelty claims against it
-- [Measurement machine](measurement-machine.md) — two machines: 8-core Lunar Lake laptop (15.5 GB, multithreaded BLAS slows CHOLMOD) and 6-core i5 desktop (31.8 GB, threads help a little at 1024); never compare across them
+- [Measurement machine](measurement-machine.md) — two machines: 8-core Lunar Lake laptop (15.5 GB, multithreaded BLAS slows CHOLMOD) and 6-core i5 PC (31.8 GB, threads help a little at 1024); always name the machine, never "this machine"; never compare across them
