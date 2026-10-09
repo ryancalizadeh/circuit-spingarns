@@ -8,7 +8,9 @@ carries on. A solver that raises or fails to converge is recorded as such too. P
 convergence rate vs array size are drawn at the end.
 
 Every finished run is written to runs.jsonl immediately, and summary.json and the plots are refreshed after each array
-size, so an interrupted sweep keeps its data; --resume continues it, skipping runs that already have a record.
+size, so an interrupted sweep keeps its data; --resume continues it, skipping runs that already have a record. An isolated
+run also records the peak resident memory of its process (peak_memory, in bytes; None without isolation, where the
+process is shared).
 
 Examples:
     python run_experiments.py --sizes 8 16 32 64 --runs 5
@@ -22,8 +24,8 @@ Output, in results/<timestamp>/ (or --out):
     experiment.json  sweep specification, solver settings, git commit and package versions
     runs.jsonl       one JSON record per run, appended as each run finishes
     pickles/         full Result objects (Config, branch voltages and currents), unless --no-pickle
-    summary.json     per (algorithm, size) mean/std of runtime and iterations over converged runs
-    runtime.png, iterations.png, convergence.png
+    summary.json     per (algorithm, size) mean/std of runtime, iterations and peak memory over converged runs
+    runtime.png, iterations.png, convergence.png, and memory.png when peak memory was recorded
 """
 import argparse
 import json
@@ -39,6 +41,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
+import cvxopt
 import numpy as np
 import scipy
 
@@ -71,6 +74,38 @@ def run_one(solver, cfg):
     return Result(cfg, solver.name, status, runtime, iterations, out.v, out.i, out.history)
 
 
+def peak_memory_bytes():
+    """
+    The most physical memory this process has held so far: its peak working set on Windows, its maximum resident set
+    size elsewhere. None if it cannot be read. Resident rather than committed memory, because committed memory counts
+    allocations never touched: each OpenBLAS copy (numpy's, scipy's, cvxopt's) reserves per-thread buffers, which put
+    even a 16x16 run at ~1.5 GB committed.
+    """
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        class Counters(ctypes.Structure):  # PROCESS_MEMORY_COUNTERS
+            _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD)] + [
+                (name, ctypes.c_size_t) for name in ("PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage",
+                                                     "QuotaPagedPoolUsage", "QuotaPeakNonPagedPoolUsage",
+                                                     "QuotaNonPagedPoolUsage", "PagefileUsage", "PeakPagefileUsage")]
+
+        kernel32 = ctypes.WinDLL("kernel32")
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.K32GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(Counters), wintypes.DWORD]
+        counters = Counters(cb=ctypes.sizeof(Counters))
+        if not kernel32.K32GetProcessMemoryInfo(kernel32.GetCurrentProcess(), ctypes.byref(counters), counters.cb):
+            return None
+        return int(counters.PeakWorkingSetSize)
+    try:
+        import resource
+    except ImportError:
+        return None
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return int(peak if sys.platform == "darwin" else peak * 1024)  # bytes on macOS, KiB on Linux
+
+
 def warm_up(solver, circuit):
     """One untimed solve of a tiny circuit, so one-time costs (library loading, first-call setup) are not charged to
     the timed run. A solver that fails here fails again in the timed run, where it is recorded."""
@@ -88,13 +123,15 @@ def save_pickle(res, path):
     tmp.replace(path)
 
 
-def solve_and_save(solver, p, q, seed, circuit, pickle_path, report=None):
+def solve_and_save(solver, p, q, seed, circuit, pickle_path, report=None, measure_memory=False):
     """
     Generate the circuit, solve it, and return the run summary. The summary goes to `report` (if given) before the
     full Result is pickled to `pickle_path` (if set), so a failure while pickling cannot lose the measurement.
+    measure_memory adds the process's peak memory to the summary; it is only meaningful in a process of its own.
     """
     res = run_one(solver, Config(p, q, seed=seed, **circuit))
     summary = res.summary()
+    summary["peak_memory"] = peak_memory_bytes() if measure_memory else None
     if report:
         report(summary)
     if pickle_path:
@@ -104,7 +141,7 @@ def solve_and_save(solver, p, q, seed, circuit, pickle_path, report=None):
 
 def _isolated_run(conn, solver, p, q, seed, circuit, pickle_path):
     warm_up(solver, circuit)
-    solve_and_save(solver, p, q, seed, circuit, pickle_path, report=conn.send)
+    solve_and_save(solver, p, q, seed, circuit, pickle_path, report=conn.send, measure_memory=True)
     conn.close()
 
 
@@ -113,7 +150,7 @@ def failure_summary(solver, p, q, seed, circuit, status, error, wall_time):
     params = Config(1, 1, seed=seed, **circuit).params()  # full parameter set without building the p x q array
     params.update(num_word_lines=p, num_bit_lines=q)
     return dict(algorithm=solver.name, p=p, q=q, seed=seed, status=status, runtime=None, iterations=None,
-                error=error, history=dict(wall_time=wall_time), config=params)
+                error=error, history=dict(wall_time=wall_time), config=params, peak_memory=None)
 
 
 def run_isolated(solver, p, q, seed, circuit, pickle_path, timeout=None):
@@ -190,7 +227,8 @@ def run_sweep(sizes, runs, solvers, out_dir, base_seed=0, circuit=None, save_pic
             isolated=isolate,
             timeout=timeout,
             git_commit=git_commit(),
-            versions=dict(python=platform.python_version(), numpy=np.__version__, scipy=scipy.__version__),
+            versions=dict(python=platform.python_version(), numpy=np.__version__, scipy=scipy.__version__,
+                          cvxopt=cvxopt.__version__),
         )
     spec_path.write_text(json.dumps(spec, indent=2))
 
@@ -222,7 +260,7 @@ def run_sweep(sizes, runs, solvers, out_dir, base_seed=0, circuit=None, save_pic
                     os.fsync(log.fileno())  # the record survives even if the machine goes down next
                     runtime = "-" if summary["runtime"] is None else f"{summary['runtime']:9.4f}s"
                     iters = "-" if summary["iterations"] is None else summary["iterations"]
-                    print(f"[{done}/{total}] {solver.name:<10} {p}x{q} seed={seed}: {summary['status']:<13} "
+                    print(f"[{done}/{total}] {solver.name:<16} {p}x{q} seed={seed}: {summary['status']:<13} "
                           f"{runtime}  iters={iters}" + (f"  ({summary['error']})" if summary["error"] else ""),
                           flush=True)
             checkpoint(out_dir, solvers)

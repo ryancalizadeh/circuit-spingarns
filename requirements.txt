@@ -2,3 +2,4 @@ PySpice
 numpy
 scipy
 matplotlib
+cvxopt

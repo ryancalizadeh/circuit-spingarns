@@ -85,6 +85,10 @@ def test_isolated_runs_survive_crashes_and_hangs():
         assert [json.loads(line)["status"] for line in open(out / "runs.jsonl")] == ["converged", "crashed", "timeout"]
         rows = {r["algorithm"]: r for r in json.load(open(out / "summary.json"))}
         assert rows["fake_death"]["crashed"] == 1 and rows["fake_hang"]["timeouts"] == 1
+        # an isolated run measures its own process's peak memory; a process that never reported has none
+        assert status["fake_ok"]["peak_memory"] > 1e6 and rows["fake_ok"]["peak_memory_gb_mean"] > 0
+        assert status["fake_death"]["peak_memory"] is None and status["fake_hang"]["peak_memory"] is None
+        assert (out / "memory.png").stat().st_size > 0
         # the child process pickled the full result, and nothing half-written is left
         with open(out / "pickles" / "fake_ok_3x3_seed0.pkl", "rb") as f:
             assert pickle.load(f).v.shape == (27,)
@@ -127,6 +131,8 @@ def test_sweep_records_saves_and_plots():
         assert all(r["status"] == "error" and "singular matrix" in r["error"] for r in by_alg["fake_crash"])
         # non-converged runs report no iteration count
         assert all(r["iterations"] is None for r in records if r["status"] != "converged")
+        # runs sharing this process have no peak memory of their own, so none is recorded or plotted
+        assert all(r["peak_memory"] is None for r in records) and not (out / "memory.png").exists()
         # every algorithm saw the same seeds, i.e. the same circuits
         assert {(r["p"], r["seed"]) for r in by_alg["fake_ok"]} == {(r["p"], r["seed"]) for r in by_alg["fake_crash"]}
 

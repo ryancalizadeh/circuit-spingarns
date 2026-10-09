@@ -29,8 +29,8 @@ def load_runs(run_dir):
 
 def summarize(runs):
     """
-    Aggregate run records per (algorithm, p, q). Runtime and iterations are averaged over converged runs only:
-    a run that hit its iteration budget or raised has no meaningful runtime to compare.
+    Aggregate run records per (algorithm, p, q). Runtime, iterations and peak memory (in GB, where recorded) are
+    averaged over converged runs only: a run that hit its iteration budget or raised has no meaningful runtime to compare.
     """
     groups = defaultdict(list)
     for r in runs:
@@ -40,6 +40,7 @@ def summarize(runs):
         ok = [r for r in rs if r["status"] == "converged"]
         rt = np.array([r["runtime"] for r in ok], dtype=float)
         it = np.array([r["iterations"] for r in ok], dtype=float)
+        mem = np.array([r["peak_memory"] / 1e9 for r in ok if r.get("peak_memory") is not None], dtype=float)
         rows.append(dict(
             algorithm=alg, p=p, q=q, cells=p * q, branches=3 * p * q,
             runs=len(rs), converged=len(ok),
@@ -49,6 +50,8 @@ def summarize(runs):
             timeouts=sum(r["status"] == "timeout" for r in rs),
             runtime_mean=float(rt.mean()) if ok else None, runtime_std=float(rt.std()) if ok else None,
             iterations_mean=float(it.mean()) if ok else None, iterations_std=float(it.std()) if ok else None,
+            peak_memory_gb_mean=float(mem.mean()) if mem.size else None,
+            peak_memory_gb_std=float(mem.std()) if mem.size else None,
         ))
     return rows
 
@@ -137,7 +140,8 @@ def _plot_convergence(rows, algorithms, path):
 def make_plots(run_dir, algorithms=None):
     """
     Aggregate `runs.jsonl` in `run_dir`, write `summary.json`, and draw runtime.png, iterations.png and
-    convergence.png. `algorithms` fixes the color order; it defaults to the order recorded in experiment.json.
+    convergence.png, plus memory.png if any run recorded its peak memory. `algorithms` fixes the color order; it defaults
+    to the order recorded in experiment.json.
     """
     run_dir = Path(run_dir)
     if algorithms is None:
@@ -150,4 +154,7 @@ def make_plots(run_dir, algorithms=None):
     _plot_metric(rows, algorithms, "iterations", "Iteration count vs array size", "iterations",
                  run_dir / "iterations.png")
     _plot_convergence(rows, algorithms, run_dir / "convergence.png")
+    if any(r["peak_memory_gb_mean"] is not None for r in rows):
+        _plot_metric(rows, algorithms, "peak_memory_gb", "Peak memory vs array size", "peak resident memory (GB)",
+                     run_dir / "memory.png")
     return rows

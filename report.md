@@ -2,6 +2,8 @@
 
 *2026-10-05. Covers the implementation of `SpingarnSolver.solve` from `instructions.md`, the design choices made along the way, the measurements behind them, and what remains open.*
 
+*Update 2026-10-08: §6 adds a Cholesky factorization (CHOLMOD) in a geometric nested-dissection ordering, which is now the default. Throughout §1–5, `spingarn` and `spingarn_sector` mean the SuperLU versions; that solver is now registered as `spingarn_slu`. §6 was measured on a different machine from §3, so their runtimes and memory are not comparable.*
+
 ## Summary
 
 - The iteration in `instructions.md` is implemented in [algorithms/spingarns.py](algorithms/spingarns.py) and passes 10 new tests in [testing/test_spingarn.py](testing/test_spingarn.py). The 15 existing tests still pass.
@@ -9,6 +11,7 @@
 - **The choice of Γ for the memristive devices decides the iteration count.** Matching devices at $R_{min}$ takes **5 iterations**; matching at $\sqrt{R_{min}R_{max}}$ takes **85–92**. Following your decision, both are registered as separate solvers: `spingarn` ($R_{min}$) and `spingarn_sector` ($\sqrt{R_{min}R_{max}}$).
 - **Spingarn is faster than SPICE at every size from 32×32 up.** At 1024×1024, `spingarn` takes 32 s and 3.75 GB, against SPICE/KLU's projected 6–7 min and 12–15 GB. At large sizes nearly all of Spingarn's runtime is a single sparse factorization, not the iterations.
 - **The accuracy comparison with SPICE is not yet like-for-like.** SPICE at RELTOL 1e-3 actually returns KCL residuals around 1e-11, while Spingarn stops at its tolerance, around 1e-9. Tolerances need aligning before runtimes are compared as equal-accuracy results.
+- **2026-10-08: CHOLMOD in a geometric nested-dissection ordering is now the default (§6).** At 1024×1024 it runs 6.2× faster than the SuperLU solver (5.4 s vs 33.4 s) and needs half the memory (2.1 GB vs 4.2 GB), measured on a different machine from the figures above. CHOLMOD does not do this ordering on its own. The ordering alone makes SuperLU 3.9× faster.
 
 ## 1. The algorithm as implemented
 
@@ -108,6 +111,8 @@ The device law is written out in the solver, as SPICE's netlist writer also does
 **Linear branches** use the closed form $v = (aR + \gamma\,\mathrm{emf})/(R+\gamma)$.
 
 ### 2.4 Linear solver: SuperLU, minimum-degree ordering, symmetric mode
+
+*Since 2026-10-08 this is the legacy solver `spingarn_slu`; the default is CHOLMOD in a geometric nested-dissection ordering (§6).*
 
 **Why SuperLU.** scipy 1.18 here offers only SuperLU (`splu`); CHOLMOD and UMFPACK are not installed.
 
@@ -265,9 +270,7 @@ With $R_{min} = R_{max}$, every branch is matched and the contraction bound is 0
    - restrict the resolvent's Newton loop to unconverged entries.
 
    Expected gain is about 2× per iteration at mid sizes, which matters mainly for `spingarn_sector`.
-6. **Better orderings or factorizations:**
-   - a geometric nested-dissection ordering, which is easy here because the crossbar is a 2-D grid of (w, b) pairs;
-   - a Cholesky factorization, which halves memory and flops compared with LU. CHOLMOD via scikit-sparse, or MKL Pardiso, would also be multithreaded. Both are new dependencies, so not added without asking.
+6. **Better orderings or factorizations.** *Done 2026-10-08, see §6:* CHOLMOD (through cvxopt, as scikit-sparse has no Windows wheel) in a geometric nested-dissection ordering. Multithreading turned out to slow CHOLMOD down on the current machine (§6.4).
 7. **2048×2048 is untested.** Expect about 18 GB and about 4 min of factorization. SuperLU's 32-bit indices may become a hard limit near 2 billion stored nonzeros. This is the size where SPICE is expected to run out of memory, so it is the most interesting point for the project's hypothesis.
 
 ### 4.3 Generality
@@ -310,3 +313,166 @@ What the 10 tests cover:
 - rejection of bad options;
 - registry defaults;
 - a sweep through the runner with both variants.
+
+## 6. Cholesky and geometric nested dissection (2026-10-08)
+
+*Measured on an 8-core laptop (Intel Core Ultra 7 256V: 4 performance and 4 low-power cores, 15.5 GB RAM), not on the 32 GB machine of §3, so runtimes and memory here are not comparable with §3's. SPICE is not part of this comparison: ngspice is not installed on this machine, by your choice.*
+
+### 6.1 What changed
+
+- **New default.** `spingarn` and `spingarn_sector` now factorize $L_\Gamma$ with CHOLMOD's supernodal Cholesky, $L_\Gamma = LL^T$, in a geometric nested-dissection ordering (GNDO) computed from the crossbar's grid.
+- **Legacy.** The SuperLU solver of §2.4 is kept unchanged as `spingarn_slu`.
+- **Control.** `spingarn_cholmod` is CHOLMOD with its own ordering, so comparing it with `spingarn` isolates what GNDO adds.
+- **Options**, for any variant through `--options`:
+  - `factorization`: `"cholmod"` or `"slu"`;
+  - `ordering`: `"nested_dissection"`, or `"builtin"` for the library's own;
+  - `blas_threads`: default 1 (§6.4).
+- **Why cvxopt.** SciPy 1.18 has no sparse Cholesky. scikit-sparse, the usual CHOLMOD binding, ships only a source package for Windows, and this machine has no C compiler. cvxopt 1.3.3 ships a Python 3.14 Windows wheel that contains CHOLMOD (SuiteSparse 7.11, 64-bit indices) and its own OpenBLAS, and it accepts a user permutation.
+- **New run history fields:**
+  - `ordering_time`, `factor_time`, `ordering_used` and `blas_threads`;
+  - for CHOLMOD, also `cholmod_ordering` and `lnz`, the exact nonzeros of $L$.
+  - `factor_nnz` now means entries stored: $L$ and $U$ for SuperLU, $L$ with its supernodal padding for CHOLMOD.
+- **Runner.** Every isolated run records its process's peak resident memory (`peak_memory`), plotted as `memory.png`.
+
+### 6.2 Does CHOLMOD do nested dissection by itself?
+
+**No. GNDO is an extra step.** CHOLMOD sees only the matrix, never the grid, so it cannot do *geometric* nested dissection.
+- Its default ordering is AMD, an approximate minimum-degree method like SuperLU's MMD.
+- Builds that include METIS can also try *algebraic* nested dissection, with separators found by a graph partitioner. cvxopt's build leaves METIS out, so here CHOLMOD on its own always uses AMD.
+- GNDO is passed to CHOLMOD as a permutation with `nmethods = 1`, which makes CHOLMOD use it as given instead of comparing it with AMD and keeping the better one.
+
+The runs confirm this. cvxopt does not expose the factor's statistics, so the solver reads CHOLMOD's own `cholmod_factor` struct through ctypes, checking each field's plausibility first. Left to itself, CHOLMOD reports ordering `amd`. Given GNDO, it reports `given`. A test checks both.
+
+### 6.3 The ordering
+
+Implemented in [algorithms/ordering.py](algorithms/ordering.py).
+
+- **Separators.** Each cross-point holds a word node and a bit node. Only word wires join neighbouring columns, and only bit wires join neighbouring rows. So a vertical cut needs only the $p$ word nodes of one column, and a horizontal cut only the $q$ bit nodes of one row. The separators are as small as on a grid with one node per cross-point.
+- **Stranded lines.** A vertical cut leaves the bit nodes of the cut column joined to neither half. They stay with the left half, where later horizontal cuts split them. A horizontal cut's word row stays with the top half in the same way.
+- **Recursion.** Each region is cut across its longer side, at the middle. The first half is ordered, then the second, then the separator. Regions of at most 64 nodes are numbered in natural order.
+- **Correctness.** A test checks every split, down to single nodes, on seven shapes including 1×9, 9×1 and 13×7. At each split, the separator and the two halves partition the region, and no branch joins the halves.
+
+**Leaf size.** Measured at 1024×1024 with CHOLMOD on 1 thread, medians of 3:
+
+| leaf (nodes) | ordering | symbolic | numeric | total | one solve | nonzeros of $L$ | stored |
+|---|---|---|---|---|---|---|---|
+| CHOLMOD's AMD | (in symbolic) | 0.89 s | 2.92 s | 3.81 s | 172 ms | 116.6M | 165.1M |
+| 16 | 0.36 s | 0.42 s | 1.08 s | 1.86 s | 140 ms | 58.8M | 99.3M |
+| 32 | 0.20 s | 0.42 s | 1.07 s | 1.69 s | 138 ms | 60.1M | 99.5M |
+| **64** | 0.13 s | 0.43 s | 1.07 s | **1.63 s** | 136 ms | 62.2M | **95.6M** |
+| 128 | 0.10 s | 0.42 s | 1.09 s | 1.60 s | 136 ms | 67.9M | 103.8M |
+
+- **The numeric factorization doesn't depend on leaf size.** It is the same from 16 to 128 nodes.
+- **Larger leaves trade ordering time for fill.** They make the Python ordering cheaper but add fill.
+- **64 is the chosen default.** It stores the fewest entries, because CHOLMOD pads and merges supernodes differently, and it is within 2% of the fastest total.
+
+### 6.4 BLAS threads
+
+cvxopt's OpenBLAS uses every core by default, and on this machine that made CHOLMOD several times slower. Numeric factorization with AMD, one process per thread count, 3 repeats:
+
+| size | 1 thread | 2 | 4 | 8 (default) |
+|---|---|---|---|---|
+| 256×256 | 0.095–0.106 s | — | 0.35–0.49 s | 1.00–1.11 s |
+| 512×512 | 0.98–1.03 s | 0.90–0.97 s | 0.97–1.32 s | 2.21–3.01 s |
+| 1024×1024 | 4.57–4.80 s | 3.64–3.75 s | 5.38–5.59 s | 9.35–9.64 s |
+
+- **Likely cause.** Most supernodes are small, so splitting their dense kernels across threads costs more in synchronization than it saves. Beyond 2 threads, work also lands on the slow low-power cores, and the fast cores wait for them.
+- **Decision (yours).** `blas_threads = 1` by default. SuperLU is single-threaded, so this also keeps the comparison like for like. A second thread's effect is measured in §6.5.
+- **Absolute times drift.** This table was measured while the machine was slower than for the leaf-size table above (AMD's numeric factorization at 1024: 4.6 s here, 2.9 s there), so compare within a table, not across tables.
+
+### 6.5 Results
+
+**Setup.** Three runner sweeps, 3 seeds per size, each run in its own process, 1 BLAS thread unless noted:
+
+```
+python run_experiments.py --sizes 16 32 64 128 256 512 1024 --runs 3 --algorithms spingarn_slu spingarn_cholmod spingarn --no-pickle --out results/factorization
+python run_experiments.py --sizes 64 128 256 512 1024 --runs 3 --algorithms spingarn_slu --options '{"spingarn_slu": {"ordering": "nested_dissection"}}' --no-pickle --out results/slu_nd
+python run_experiments.py --sizes 256 512 1024 --runs 3 --algorithms spingarn_cholmod spingarn --options '{"spingarn_cholmod": {"blas_threads": 2}, "spingarn": {"blas_threads": 2}}' --no-pickle --out results/cholmod_2threads
+python compare_factorizations.py results/factorization results/slu_nd results/cholmod_2threads
+```
+
+All 96 runs converged in 5 iterations. Answers agree across backends to about 3e-12 (a test checks this at 32×32).
+
+![Factorization comparison](report_assets/factorization_comparison.png)
+
+**Total runtime (s)**, mean over 3 seeds. The standard deviation is within 6% of the mean from 64×64 up and within 1% at 1024×1024, but reaches 18% at 16×16, where a run takes 2 ms:
+
+| size | SuperLU · MMD (`spingarn_slu`) | SuperLU · GNDO | CHOLMOD · AMD (`spingarn_cholmod`) | CHOLMOD · GNDO (`spingarn`) |
+|---|---|---|---|---|
+| 16×16 | 0.0018 | — | 0.0015 | 0.0015 |
+| 32×32 | 0.0040 | — | 0.0033 | 0.0030 |
+| 64×64 | 0.018 | 0.014 | 0.012 | 0.010 |
+| 128×128 | 0.10 | 0.066 | 0.057 | 0.052 |
+| 256×256 | 0.71 | 0.36 | 0.32 | 0.28 |
+| 512×512 | 4.67 | 1.75 | 1.63 | 1.28 |
+| 1024×1024 | 33.4 | 8.61 | 8.22 | **5.42** |
+
+**At 1024×1024:**
+
+| | SuperLU · MMD | SuperLU · GNDO | CHOLMOD · AMD | CHOLMOD · GNDO |
+|---|---|---|---|---|
+| ordering + factorization | 29.2 s | 5.00 s | 4.21 s | **1.90 s** |
+| time per iteration | 690 ms | 598 ms | 678 ms | 591 ms |
+| factor entries stored | 270M (L+U) | 124M (L+U) | 165M | **95.6M** |
+| nonzeros of $L$ | — | — | 117M | **62.2M** |
+| peak resident memory | 4.17 GB | 2.78 GB | 2.62 GB | **2.10 GB** |
+
+**What GNDO adds**, as the library's own ordering ÷ GNDO (above 1: GNDO is better):
+
+| size | CHOLMOD runtime | CHOLMOD ordering + factorization | CHOLMOD nonzeros of $L$ | CHOLMOD memory | SuperLU runtime | SuperLU ordering + factorization | SuperLU memory |
+|---|---|---|---|---|---|---|---|
+| 256×256 | 1.16× | 1.40× | 1.28× | 1.04× | 2.00× | 3.03× | 1.16× |
+| 512×512 | 1.28× | 1.76× | 1.59× | 1.15× | 2.67× | 4.28× | 1.33× |
+| 1024×1024 | 1.52× | 2.22× | 1.88× | 1.25× | 3.88× | 5.85× | 1.50× |
+
+- **The ordering is the larger of the two changes.** From the legacy solver to the new default, runtime at 1024×1024 falls 6.2×:
+  - GNDO alone accounts for 3.9×, from SuperLU/MMD to SuperLU/GNDO;
+  - Cholesky adds a further 1.6×, from SuperLU/GNDO to CHOLMOD/GNDO.
+- **GNDO's advantage grows with size.** Within CHOLMOD, its factorization speedup rises from 1.40× at 256 to 1.76× at 512 and 2.22× at 1024.
+- **Memory halves.** CHOLMOD/GNDO peaks at 2.10 GB at 1024×1024, against 4.17 GB for SuperLU/MMD. About 0.1 GB of every figure is the interpreter and its libraries.
+- **Small arrays gain little.** Below 64×64 every variant finishes in 2–4 ms, so the differences don't matter in practice. At 16×16, GNDO's $L$ even has slightly more nonzeros than AMD's, because a whole array that small is a few leaves numbered in natural order.
+
+**Scaling**, as log-log slopes over 128×128 to 1024×1024, with nodes $N = 2n^2$:
+
+| configuration | ordering + factorization ∝ $N$^ | nonzeros of $L$ ∝ $N$^ | stored ∝ $N$^ | ordering + factorization ∝ stored^ |
+|---|---|---|---|---|
+| SuperLU · MMD | 1.46 | — | 1.19 | 1.23 |
+| SuperLU · GNDO | 1.20 | — | 1.11 | 1.08 |
+| CHOLMOD · AMD | 1.26 | 1.24 | 1.17 | 1.08 |
+| CHOLMOD · GNDO | 1.11 | 1.11 | 1.07 | 1.04 |
+
+- **GNDO's fill follows $N \log N$.** Over this range, $N \log N$ has a local slope of 1.07–1.09, and the measured slope is 1.11. AMD's fill grows faster, at 1.24.
+- **SuperLU/MMD matches §2.4.** Its factorization slope of 1.46 agrees with the 1.45 measured on the other machine.
+- **Scaling against nonzeros.** This answers the meeting note on checking scaling against nonzeros as well as $N$: CHOLMOD's factorization time is close to linear in the entries it stores (slope 1.04–1.08), while SuperLU/MMD's grows faster (1.23).
+- **These are local slopes, not asymptotes.** Nested dissection's flops grow as $N^{1.5}$, but at these sizes CHOLMOD/GNDO's time still tracks its fill, so its slope should rise toward 1.5 on larger arrays.
+
+**BLAS threads.** A second thread changed total runtime by at most 2%, and the factorization by 0.95–1.09×, at every size from 256 to 1024. So 1 thread stays the default.
+
+### 6.6 What this means, and next steps
+
+1. **The factorization is no longer the bottleneck.** At 1024×1024, `spingarn` spends 1.9 s factorizing and about 3.0 s in its 5 iterations. An iteration takes 591 ms, of which the triangular solve is only about 136 ms (§6.3). §4.2 item 5, the per-iteration overhead, is now the bigger lever, above all for `spingarn_sector` with its ~91 iterations.
+2. **2048×2048 now looks feasible here.** It wasn't run, since you chose to stop at 1024. Extrapolating the measured growth in peak memory from 512 to 1024 (3.6× for CHOLMOD/GNDO, 4.3× for SuperLU/MMD per 4× nodes):
+   - CHOLMOD/GNDO would need about 8 GB, which fits in this machine's 15.5 GB;
+   - SuperLU/MMD would need about 18 GB, matching §4.2 item 7's projection.
+3. **The SPICE comparison is still to do.** It needs ngspice on this machine, since §3's SPICE numbers come from the other machine.
+4. **Re-check the thread default on other hardware.** It was measured on this laptop's mix of fast and slow cores.
+5. **Compare `factor_nnz` only within one library.** It counts $L$ and $U$ for SuperLU but $L$ alone for CHOLMOD. Across libraries, compare `lnz` (CHOLMOD only) or peak memory.
+
+### 6.7 Files changed (2026-10-08)
+
+| file | change |
+|---|---|
+| [algorithms/ordering.py](algorithms/ordering.py) | new: `nested_dissection` |
+| [algorithms/spingarns.py](algorithms/spingarns.py) | `factorize`, `cholmod_factor_stats`, `blas_threads`; options `factorization`, `ordering`, `blas_threads`; `SpingarnSLUSolver`, `SpingarnCholmodSolver` |
+| [algorithms/__init__.py](algorithms/__init__.py) | registers `spingarn_slu` and `spingarn_cholmod`, appended so existing plot colors are unchanged |
+| [run_experiments.py](run_experiments.py) | `peak_memory` per isolated run; cvxopt version in `experiment.json` |
+| [plotting.py](plotting.py) | peak memory in `summary.json` and `memory.png` |
+| [compare_factorizations.py](compare_factorizations.py) | new: the tables and figure of §6.5 |
+| [testing/test_ordering.py](testing/test_ordering.py) | new: 5 tests |
+| [testing/test_spingarn.py](testing/test_spingarn.py) | 13 tests (was 10), covering all backends against Newton, `factorize` in any ordering, CHOLMOD's readback and fill, thread control, and the registry |
+| [testing/test_experiments.py](testing/test_experiments.py) | peak memory is recorded for isolated runs only |
+| requirements.txt | adds cvxopt |
+| README.md | variants, options and the tests line (still UTF-16 LE) |
+| memory/ | `python-environment.md` updated; `measurement-machine.md` new; `spingarn-solver-findings.md` updated |
+
+Nothing is committed.

@@ -4,3 +4,4 @@ app.log
 *.pyc
 archive/
 results/
+notes.md
