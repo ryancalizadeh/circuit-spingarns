@@ -63,14 +63,16 @@ def node_names(cfg):
     return [f"w{r}_{c}" for r in range(p) for c in range(q)] + [f"b{r}_{c}" for r in range(p) for c in range(q)]
 
 
-# ngspice's notes when a fallback for the operating point succeeds; plain Newton prints none.
-_OP_METHODS = [("transient op finished successfully", "transient op"),
+# ngspice's notes when a fallback for the operating point succeeds; plain Newton prints none. When every fallback fails,
+# ngspice still leaves an op plot behind (holding the last iterate), so total failure needs a marker of its own.
+_OP_METHODS = [("operating point could not be simulated", "failed"),
+               ("transient op finished successfully", "transient op"),
                ("source stepping completed", "source stepping"),
                ("gmin stepping completed", "gmin stepping")]
 
 
 def op_method(notes):
-    """How ngspice reached its operating point, from its stderr notes."""
+    """How ngspice reached its operating point, from its stderr notes; "failed" if it did not."""
     text = "\n".join(notes).lower()
     for marker, method in _OP_METHODS:
         if marker in text:
@@ -94,8 +96,14 @@ _RUSAGE = {
 
 
 def rusage(ng):
+    # After a failed analysis, rusage still prints its statistics but also an internal error on stderr
+    # ("if_getstat: ... can't get a name for analysis parameter 53"), which PySpice raises as a command error.
+    try:
+        lines = ng.exec_command("rusage everything", join_lines=False)
+    except NgSpiceCommandError:
+        lines = ng.stdout.splitlines()
     stats = {}
-    for line in ng.exec_command("rusage everything", join_lines=False):
+    for line in lines:
         key, sep, value = line.partition("=")
         match = re.match(r"\s*([-+0-9.eE]+)", value)
         if sep and match and key.strip() in _RUSAGE:
@@ -183,6 +191,8 @@ class SpiceSolver(Solver):
                 history["method"] = None
                 return SolveOutput(None, None, False, iterations, history)
             history["method"] = op_method(notes)
+            if history["method"] == "failed":
+                return SolveOutput(None, None, False, iterations, history)
 
             t = time.perf_counter()
             by_name = read_op(ng, plots[0], raw)

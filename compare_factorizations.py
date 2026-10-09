@@ -6,12 +6,15 @@ experiment-runner results.
 Prints markdown tables, per array size, of total runtime; of the factorization's cost (ordering + factorization time), its
 fill (entries stored, and for CHOLMOD the exact nonzeros of L) and the process's peak memory; of what GNDO changes within
 each library; of what a second BLAS thread changes for CHOLMOD; and of log-log scaling exponents against the node count
-and against the stored entries. Draws the single-thread configurations as small multiples to --plot.
+and against the stored entries. SPICE runs in the same directories (algorithm "spice") join the runtime, iteration,
+accuracy and memory tables, with their own breakdown of where ngspice's time goes and how SPICE compares with Spingarn.
+Draws the single-thread configurations, and SPICE where it has the metric, as small multiples to --plot.
 
     python compare_factorizations.py results/factorization results/slu_nd results/cholmod_2threads
 
-Records are grouped by configuration (library, ordering, BLAS threads), read from each directory's experiment.json and
-the runs' own history, so directories may be combined freely; only converged runs count.
+Records are grouped by configuration (library, ordering, BLAS threads; SPICE by its matrix solver), read from each
+directory's experiment.json and the runs' own history, so directories may be combined freely; only converged runs count
+in the statistics, and every other outcome is listed.
 """
 import argparse
 import json
@@ -38,17 +41,36 @@ PLOTTED = [  # (label, color of, marker, line style)
     ("SuperLU · GNDO", "spingarn_slu", "D", (0, (4, 2))),
     ("CHOLMOD · AMD", "spingarn_cholmod", "^", "-"),
     ("CHOLMOD · GNDO", "spingarn", "o", "-"),
+    ("SPICE · KLU", "spice", "v", (0, (1, 1.5))),
 ]
-METRICS = {  # name -> value of one run record, or None
+
+
+def _sum(*values):
+    return None if any(v is None for v in values) else sum(values)
+
+
+METRICS = {  # name -> value of one run record, or None where the run does not report it
     "runtime": lambda r: r["runtime"],
-    "factorization": lambda r: r["history"]["ordering_time"] + r["history"]["factor_time"],
-    "ordering": lambda r: r["history"]["ordering_time"],
-    "factor": lambda r: r["history"]["factor_time"],
-    "per_iteration": lambda r: r["history"]["iteration_time"] / r["iterations"],
+    "iterations": lambda r: r["iterations"],
+    "kcl": lambda r: r["history"].get("kcl_residual_rel"),
+    "factorization": lambda r: _sum(r["history"].get("ordering_time"), r["history"].get("factor_time")),
+    "ordering": lambda r: r["history"].get("ordering_time"),
+    "factor": lambda r: r["history"].get("factor_time"),
+    "per_iteration": lambda r: None if "iteration_time" not in r["history"] else
+    r["history"]["iteration_time"] / r["iterations"],
     "stored": lambda r: r["history"].get("factor_nnz"),
     "lnz": lambda r: r["history"].get("lnz"),
     "memory": lambda r: None if r.get("peak_memory") is None else r["peak_memory"] / 1e9,
+    # SPICE only, from ngspice's own accounting (rusage) and the solver's timers
+    "spice_load": lambda r: r["history"].get("load_time"),
+    "spice_run": lambda r: r["history"].get("run_time"),
+    "spice_reorder": lambda r: r["history"].get("matrix_reorder_time"),
+    "spice_factor": lambda r: r["history"].get("matrix_factor_time"),
+    "spice_lu": lambda r: _sum(r["history"].get("nonzeros"), r["history"].get("fill_in")),
+    "spice_fill": lambda r: None if not r["history"].get("nonzeros") or r["history"].get("fill_in") is None else
+    (r["history"]["nonzeros"] + r["history"]["fill_in"]) / r["history"]["nonzeros"],
 }
+SPICE = "SPICE · KLU"
 
 
 def label(options, history):
@@ -61,36 +83,51 @@ def label(options, history):
 
 
 def load(directories):
-    """Converged Spingarn runs from every directory, as {(configuration, n): [run record, ...]} for n x n arrays."""
-    groups = defaultdict(list)
+    """
+    Spingarn and SPICE runs from every directory: the converged ones as {(configuration, n): [run record, ...]} for
+    n x n arrays, and every other outcome as a list of (configuration, n, seed, status, error).
+    """
+    groups, failures = defaultdict(list), []
     for directory in directories:
         directory = Path(directory)
         options = {s["name"]: s for s in json.loads((directory / "experiment.json").read_text())["solvers"]}
         with open(directory / "runs.jsonl") as f:
             for line in f:
                 r = json.loads(line) if line.strip() else None
-                if r and r["status"] == "converged" and "factorization" in options.get(r["algorithm"], {}):
-                    if r["p"] != r["q"]:
-                        raise ValueError(f"{directory}: only square arrays are compared, found {r['p']}x{r['q']}")
-                    groups[label(options[r["algorithm"]], r["history"]), r["p"]].append(r)
-    return groups
+                solver = options.get(r["algorithm"], {}) if r else {}
+                if r and "factorization" in solver:
+                    config = label(solver, r["history"]) if "ordering_used" in r["history"] else r["algorithm"]
+                elif r and r["algorithm"] == "spice":
+                    config = f"SPICE · {solver.get('matrix_solver', 'klu').upper()}"
+                else:
+                    continue
+                if r["p"] != r["q"]:
+                    raise ValueError(f"{directory}: only square arrays are compared, found {r['p']}x{r['q']}")
+                if r["status"] == "converged":
+                    groups[config, r["p"]].append(r)
+                else:
+                    failures.append((config, r["p"], r["seed"], r["status"], r.get("error")))
+    return groups, failures
 
 
 def aggregate(groups):
-    """{configuration: {n: {metric: (mean, std, runs)}}} over each group's runs that report the metric."""
+    """{configuration: {n: {metric: (mean, std, runs, max)}}} over each group's runs that report the metric."""
     table = defaultdict(dict)
     for (config, n), runs in groups.items():
         stats = {}
         for name, value in METRICS.items():
             values = np.array([v for v in map(value, runs) if v is not None], dtype=float)
-            stats[name] = (values.mean(), values.std(), len(values)) if values.size else None
+            stats[name] = (values.mean(), values.std(), len(values), values.max()) if values.size else None
         table[config][n] = stats
     return table
 
 
+WORST = {"kcl"}  # metrics tabulated by their worst (largest) run rather than the mean
+
+
 def cell(table, config, n, metric, fmt, scale=1.0):
     stats = table.get(config, {}).get(n, {}).get(metric)
-    return "—" if stats is None else fmt.format(stats[0] * scale)
+    return "—" if stats is None else fmt.format(stats[3 if metric in WORST else 0] * scale)
 
 
 def markdown(header, rows):
@@ -114,7 +151,7 @@ def exponent(table, config, x_metric, y_metric, min_n):
     return f"{np.polyfit(*zip(*points), 1)[0]:.2f}" if len(points) >= 3 else "—"
 
 
-def report(table, min_n):
+def report(table, min_n, failures=()):
     configs = [c for c in [p[0] for p in PLOTTED] + sorted(table) if c in table]
     configs = list(dict.fromkeys(configs))  # plotted order first, then any others
     sizes = sorted({n for c in configs for n in table[c]})
@@ -125,7 +162,17 @@ def report(table, min_n):
         "—" if table[c].get(n, {}).get("runtime") is None else
         "{:.3g} (±{:.2g})".format(*table[c][n]["runtime"][:2]) for c in configs] for n in sizes]))
 
-    for metric, title, fmt, scale in [("factorization", "Ordering + factorization (s)", "{:.3g}", 1),
+    if failures:
+        out.append("\n**Runs that did not converge** (left out of every statistic)\n")
+        out.append(markdown(["configuration", "size", "seed", "status", "error"],
+                            [[c, f"{n}×{n}", str(seed), status, error or ""]
+                             for c, n, seed, status, error in sorted(failures, key=lambda f: (f[0], f[1], f[2]))]))
+
+    for metric, title, fmt, scale in [("iterations", "Iterations (Spingarn: linear solves; SPICE: Newton)", "{:.3g}",
+                                       1),
+                                      ("kcl", "KCL residual of the answer, relative (max over converged runs)",
+                                       "{:.1e}", 1),
+                                      ("factorization", "Ordering + factorization (s)", "{:.3g}", 1),
                                       ("per_iteration", "Time per iteration (ms)", "{:.3g}", 1e3),
                                       ("stored", "Factor entries stored (millions; L+U for SuperLU, L for CHOLMOD)",
                                        "{:.3g}", 1e-6),
@@ -157,13 +204,32 @@ def report(table, min_n):
                     rows.append([c, f"{n}×{n}"] + [ratio(table, single, c, n, m) for m in ("runtime", "factor")])
         out.append(markdown(["configuration", "size", "runtime", "factorization"], rows))
 
+    if SPICE in table:
+        spice_sizes = sorted(table[SPICE])
+        out.append(f"\n**Where {SPICE}'s time goes** (mean; load = netlist parsing and setup, run = the .op analysis; "
+                   "reorder and factor are ngspice's own totals over all Newton iterations)\n")
+        out.append(markdown(["size", "total (s)", "load (s)", "run (s)", "reorder (s)", "factor (s)",
+                             "L+U entries (millions)", "L+U ÷ matrix nonzeros"],
+                            [[f"{n}×{n}"] + [cell(table, SPICE, n, m, fmt, scale) for m, fmt, scale in
+                                             [("runtime", "{:.3g}", 1), ("spice_load", "{:.3g}", 1),
+                                              ("spice_run", "{:.3g}", 1), ("spice_reorder", "{:.3g}", 1),
+                                              ("spice_factor", "{:.3g}", 1), ("spice_lu", "{:.3g}", 1e-6),
+                                              ("spice_fill", "{:.3g}", 1)]] for n in spice_sizes]))
+        others = [c for c in configs if c != SPICE and not c.endswith("threads")]
+        out.append(f"\n**{SPICE} ÷ Spingarn** (above 1: Spingarn is faster or smaller)\n")
+        out.append(markdown(["size"] + [f"runtime ÷ {c}" for c in others] + [f"memory ÷ {c}" for c in others],
+                            [[f"{n}×{n}"] + [ratio(table, SPICE, c, n, "runtime") for c in others] +
+                             [ratio(table, SPICE, c, n, "memory") for c in others] for n in spice_sizes]))
+
     out.append(f"\n**Scaling exponents** (log-log least-squares slope over sizes ≥ {min_n}×{min_n}; nodes = 2n²)\n")
-    out.append(markdown(["configuration", "ordering + factorization ∝ nodes^", "stored ∝ nodes^",
-                         "ordering + factorization ∝ stored^", "nonzeros of L ∝ nodes^"],
-                        [[c] + [exponent(table, c, x, y, min_n) for x, y in [("nodes", "factorization"),
+    out.append(markdown(["configuration", "runtime ∝ nodes^", "ordering + factorization ∝ nodes^", "stored ∝ nodes^",
+                         "ordering + factorization ∝ stored^", "nonzeros of L ∝ nodes^", "peak memory ∝ nodes^"],
+                        [[c] + [exponent(table, c, x, y, min_n) for x, y in [("nodes", "runtime"),
+                                                                             ("nodes", "factorization"),
                                                                              ("nodes", "stored"),
                                                                              ("stored", "factorization"),
-                                                                             ("nodes", "lnz")]]
+                                                                             ("nodes", "lnz"),
+                                                                             ("nodes", "memory")]]
                          for c in configs]))
     return "\n".join(out)
 
@@ -195,13 +261,17 @@ def _end_labels(ax, ends, min_gap=10.5):
                     fontsize=8, annotation_clip=False, arrowprops=connector)
 
 
-def plot(table, path):
+def plot(table, path, failures=()):
+    """Small multiples of the PLOTTED configurations. A size at which every run of a plotted configuration failed is
+    marked with a cross at the bottom of the runtime panel, in that configuration's color."""
     panels = [("runtime", "Total runtime", "seconds", 1),
               ("factorization", "Ordering + factorization", "seconds", 1),
               ("stored", "Factor entries stored", "millions", 1e-6),
               ("memory", "Peak resident memory of the run", "GB", 1)]
     fig, axes = plt.subplots(2, 2, figsize=(11, 7.6), facecolor=SURFACE)
-    sizes = sorted({n for c in table for n in table[c]})
+    plotted = {p[0] for p in PLOTTED}
+    failed = sorted({(c, n) for c, n, *_ in failures if c in plotted and n not in table.get(c, {})})
+    sizes = sorted({n for c in table for n in table[c]} | {n for _, n in failed})
     handles = {}
     for ax, (metric, title, unit, scale) in zip(axes.flat, panels):
         ax.set_facecolor(SURFACE)
@@ -219,7 +289,15 @@ def plot(table, path):
         ax.set_xscale("log")
         ax.set_yscale("log")
         ticks = [2 * n * n for n in sizes]
-        ax.set_xticks(ticks, [str(n) for n in sizes])
+        ax.set_xticks(ticks, [str(n) if n & (n - 1) == 0 else "" for n in sizes])  # other sizes would crowd them
+        if metric == "runtime":
+            for config, n in failed:
+                color_of = next(p[1] for p in PLOTTED if p[0] == config)
+                top = ax.get_xaxis_transform()  # x in data, y in axes fraction
+                ax.plot([2 * n * n], [0.05], transform=top, marker="X", markersize=9, color=_color(color_of, []),
+                        markeredgecolor=SURFACE, clip_on=False, linestyle="none")
+                ax.annotate(f"{config.split(' · ')[0]} fails at {n}×{n}", (2 * n * n, 0.05), xycoords=top,
+                            xytext=(9, 0), textcoords="offset points", va="center", color=INK_2, fontsize=8)
         ax.xaxis.set_minor_locator(ticker.NullLocator())
         ax.yaxis.set_major_locator(ticker.LogLocator(subs=(1, 2, 5)))  # labels even on a panel spanning < 1 decade
         ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda v, _: f"{v:g}"))
@@ -238,9 +316,10 @@ def plot(table, path):
         fig.canvas.draw()  # fixes the transforms that place the end labels
         _end_labels(ax, ends)
     fig.legend([handles[c] for c, *_ in PLOTTED if c in handles], [c for c, *_ in PLOTTED if c in handles],
-               loc="upper left", bbox_to_anchor=(0.01, 0.995), ncol=4, frameon=False, labelcolor=INK_2,
+               loc="upper left", bbox_to_anchor=(0.01, 0.995), ncol=len(handles), frameon=False, labelcolor=INK_2,
                handlelength=2.6)
-    fig.text(0.01, 0.005, "mean over converged runs, 1 BLAS thread; log-log axes", color=MUTED, fontsize=8)
+    fig.text(0.01, 0.005, "mean over converged runs, 1 BLAS thread; SPICE (ngspice, KLU) has no single factorization to "
+             "plot, so it appears in the runtime and memory panels only; log-log axes", color=MUTED, fontsize=8)
     fig.tight_layout(rect=(0, 0.02, 1, 0.95))
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=150, facecolor=SURFACE)
@@ -255,12 +334,13 @@ def main():
     ap.add_argument("--markdown", type=Path, help="also write the tables to this file")
     args = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")  # the tables use ×, ÷, ≥ and ·, which Windows' console code page lacks
-    table = aggregate(load(args.directories))
-    text = report(table, args.min_size)
+    groups, failures = load(args.directories)
+    table = aggregate(groups)
+    text = report(table, args.min_size, failures)
     print(text)
     if args.markdown:
         args.markdown.write_text(text + "\n", encoding="utf-8")
-    plot(table, args.plot)
+    plot(table, args.plot, failures)
     print(f"\nplot saved to {args.plot}")
 
 

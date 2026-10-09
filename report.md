@@ -4,6 +4,8 @@
 
 *Update 2026-10-08: §6 adds a Cholesky factorization (CHOLMOD) in a geometric nested-dissection ordering, which is now the default. Throughout §1–5, `spingarn` and `spingarn_sector` mean the SuperLU versions; that solver is now registered as `spingarn_slu`. §6 was measured on a different machine from §3, so their runtimes and memory are not comparable.*
 
+*Update 2026-10-09: §7 repeats §6 on a 6-core desktop with ngspice installed, and adds SPICE to the comparison. SPICE/KLU **fails** at 1024×1024, so the 1024 projection in the summary below and in §3 was wrong.*
+
 ## Summary
 
 - The iteration in `instructions.md` is implemented in [algorithms/spingarns.py](algorithms/spingarns.py) and passes 10 new tests in [testing/test_spingarn.py](testing/test_spingarn.py). The 15 existing tests still pass.
@@ -12,6 +14,7 @@
 - **Spingarn is faster than SPICE at every size from 32×32 up.** At 1024×1024, `spingarn` takes 32 s and 3.75 GB, against SPICE/KLU's projected 6–7 min and 12–15 GB. At large sizes nearly all of Spingarn's runtime is a single sparse factorization, not the iterations.
 - **The accuracy comparison with SPICE is not yet like-for-like.** SPICE at RELTOL 1e-3 actually returns KCL residuals around 1e-11, while Spingarn stops at its tolerance, around 1e-9. Tolerances need aligning before runtimes are compared as equal-accuracy results.
 - **2026-10-08: CHOLMOD in a geometric nested-dissection ordering is now the default (§6).** At 1024×1024 it runs 6.2× faster than the SuperLU solver (5.4 s vs 33.4 s) and needs half the memory (2.1 GB vs 4.2 GB), measured on a different machine from the figures above. CHOLMOD does not do this ordering on its own. The ordering alone makes SuperLU 3.9× faster.
+- **2026-10-09: the §6 results reproduce on a second machine, and SPICE is now in the comparison (§7).** `spingarn` is 9× faster than SPICE at 16×16 and 57× faster at 768×768 (2.5 s vs 145 s), with 5.8× less memory. At 1024×1024 SPICE/KLU fails even on a linear crossbar, which points to a size limit in ngspice's KLU rather than Newton non-convergence; `spingarn` solves it in 4.8 s.
 
 ## 1. The algorithm as implemented
 
@@ -454,7 +457,7 @@ All 96 runs converged in 5 iterations. Answers agree across backends to about 3e
 2. **2048×2048 now looks feasible here.** It wasn't run, since you chose to stop at 1024. Extrapolating the measured growth in peak memory from 512 to 1024 (3.6× for CHOLMOD/GNDO, 4.3× for SuperLU/MMD per 4× nodes):
    - CHOLMOD/GNDO would need about 8 GB, which fits in this machine's 15.5 GB;
    - SuperLU/MMD would need about 18 GB, matching §4.2 item 7's projection.
-3. **The SPICE comparison is still to do.** It needs ngspice on this machine, since §3's SPICE numbers come from the other machine.
+3. **The SPICE comparison is still to do.** It needs ngspice on this machine, since §3's SPICE numbers come from the other machine. *(Done on the desktop on 2026-10-09: see §7.)*
 4. **Re-check the thread default on other hardware.** It was measured on this laptop's mix of fast and slow cores.
 5. **Compare `factor_nnz` only within one library.** It counts $L$ and $U$ for SuperLU but $L$ alone for CHOLMOD. Across libraries, compare `lnz` (CHOLMOD only) or peak memory.
 
@@ -476,3 +479,158 @@ All 96 runs converged in 5 iterations. Answers agree across backends to about 3e
 | memory/ | `python-environment.md` updated; `measurement-machine.md` new; `spingarn-solver-findings.md` updated |
 
 Nothing is committed.
+
+## 7. Reproduction on a second machine, with SPICE (2026-10-09)
+
+*Measured on a desktop: Intel Core i5-11600KF (6 identical cores, 12 threads), 31.8 GB RAM, 12–18 GB of it available during the runs. Its SPICE timings match §3's (512×512: 39–41 s here, 41 s there), so it is very likely the 32 GB machine of §3. Runtimes are comparable within this section only.*
+
+### 7.1 Setup
+
+- **Environment.** Same venv packages as §6 (Python 3.14, SciPy 1.18, cvxopt 1.3.3, which had to be installed here) and ngspice-47 with KLU, the version of §3. All 33 tests pass, `test_spice.py` included.
+- **Sweeps.** The three runner sweeps of §6.5, with `spice` added to the first so that it solves the same circuits, interleaved per seed. Two extra sweeps: CHOLMOD on 6 threads (§7.3), and all four solvers at 768×768, the largest size at which SPICE works (§7.5).
+
+```
+python run_experiments.py --sizes 16 32 64 128 256 512 1024 --runs 3 --algorithms spingarn_slu spingarn_cholmod spingarn spice --timeout 3600 --no-pickle --out results/factorization
+python run_experiments.py --sizes 64 128 256 512 1024 --runs 3 --algorithms spingarn_slu --options '{"spingarn_slu": {"ordering": "nested_dissection"}}' --no-pickle --out results/slu_nd
+python run_experiments.py --sizes 256 512 1024 --runs 3 --algorithms spingarn_cholmod spingarn --options '{"spingarn_cholmod": {"blas_threads": 2}, "spingarn": {"blas_threads": 2}}' --no-pickle --out results/cholmod_2threads
+python run_experiments.py --sizes 256 512 1024 --runs 3 --algorithms spingarn_cholmod spingarn --options '{"spingarn_cholmod": {"blas_threads": 6}, "spingarn": {"blas_threads": 6}}' --no-pickle --out results/cholmod_6threads
+python run_experiments.py --sizes 768 --runs 3 --algorithms spingarn_slu spingarn_cholmod spingarn spice --timeout 3600 --no-pickle --out results/spice_768
+python compare_factorizations.py results/factorization results/slu_nd results/cholmod_2threads results/cholmod_6threads results/spice_768 --plot report_assets/desktop_comparison.png --markdown results/desktop_comparison.md
+```
+
+- **SPICE at 1024×1024 ran for 2 seeds, not 3.** Both failed (§7.4), and you stopped the third.
+- **Outcome.** All 123 Spingarn runs converged in 5 iterations. All 21 SPICE runs up to 768×768 converged in 4 Newton iterations.
+- **Full tables.** `results/desktop_comparison.md`. The figure adds 768×768 to every curve. Leaving 768 out changes no Spingarn scaling slope by more than 0.01.
+
+![Desktop comparison](report_assets/desktop_comparison.png)
+
+### 7.2 The §6 results reproduce
+
+**At 1024×1024**, desktop (laptop §6.5 in brackets):
+
+| | SuperLU · MMD | SuperLU · GNDO | CHOLMOD · AMD | CHOLMOD · GNDO |
+|---|---|---|---|---|
+| total runtime | 31.2 s (33.4) | 8.09 s (8.61) | 7.35 s (8.22) | **4.78 s** (5.42) |
+| ordering + factorization | 28.1 s (29.2) | 5.30 s (5.00) | 4.30 s (4.21) | **1.90 s** (1.90) |
+| time per iteration | 520 ms (690) | 464 ms (598) | 519 ms (678) | 486 ms (591) |
+| factor entries stored | 270M (270M) | 124M (124M) | 165M (165M) | **95.6M** (95.6M) |
+| peak resident memory | 4.17 GB (4.17) | 2.78 GB (2.78) | 2.63 GB (2.62) | **2.10 GB** (2.10) |
+
+- **Fill and memory are identical.** The orderings are deterministic. Peak memory agrees to 0.01 GB.
+- **The factorization times agree within 6%.** The iterations are 18–25% faster here, which accounts for most of the lower totals.
+- **The headline ratios hold.** Legacy → default is 6.5× (laptop 6.2×). GNDO alone gives 3.86× (3.9×), and Cholesky a further 1.69× (1.6×).
+- **What GNDO adds also matches** (library ordering ÷ GNDO, at 256 / 512 / 1024):
+  - CHOLMOD ordering + factorization: 1.38 / 1.80 / 2.27× (laptop 1.40 / 1.76 / 2.22×);
+  - CHOLMOD runtime: 1.17 / 1.33 / 1.54× (1.16 / 1.28 / 1.52×);
+  - SuperLU runtime: 1.95 / 2.68 / 3.86× (2.00 / 2.67 / 3.88×).
+- **Scaling slopes agree within 0.04.** These are log-log slopes over 128–1024, against $N = 2n^2$:
+
+| configuration | ordering + factorization ∝ $N$^ | nonzeros of $L$ ∝ $N$^ | stored ∝ $N$^ | ordering + factorization ∝ stored^ |
+|---|---|---|---|---|
+| SuperLU · MMD | 1.41 (1.46) | — | 1.19 (1.19) | 1.18 (1.23) |
+| SuperLU · GNDO | 1.19 (1.20) | — | 1.11 (1.11) | 1.07 (1.08) |
+| CHOLMOD · AMD | 1.26 (1.26) | 1.24 (1.24) | 1.17 (1.17) | 1.08 (1.08) |
+| CHOLMOD · GNDO | 1.08 (1.11) | 1.11 (1.11) | 1.08 (1.07) | 1.00 (1.04) |
+
+**Leaf size (§6.3)**, at 1024×1024, CHOLMOD on 1 thread, medians of 3. Fill is identical to §6.3, and leaf 64 is again within 1% of the fastest total while storing the fewest entries:
+
+| leaf (nodes) | ordering | symbolic | numeric | total | one solve | nonzeros of $L$ | stored |
+|---|---|---|---|---|---|---|---|
+| CHOLMOD's AMD | (in symbolic) | 1.13 s | 3.08 s | 4.25 s | 205 ms | 116.6M | 165.1M |
+| 16 | 0.32 s | 0.42 s | 1.20 s | 1.92 s | 197 ms | 58.8M | 99.3M |
+| 32 | 0.18 s | 0.41 s | 1.09 s | 1.69 s | 163 ms | 60.1M | 99.5M |
+| **64** | 0.12 s | 0.39 s | 1.12 s | **1.63 s** | 171 ms | 62.2M | **95.6M** |
+| 128 | 0.09 s | 0.41 s | 1.12 s | 1.62 s | 154 ms | 67.9M | 103.8M |
+
+### 7.3 BLAS threads: the laptop's slowdown does not reproduce
+
+Numeric factorization with AMD, one process per thread count, 3 repeats (the measurement of §6.4):
+
+| size | 1 thread | 2 | 4 | 6 | 12 (default) |
+|---|---|---|---|---|---|
+| 256×256 | 0.061–0.062 s | 0.072–0.076 s | 0.076–0.144 s | 0.071–0.106 s | 0.103–0.154 s |
+| 512×512 | 0.434–0.450 s | 0.416–0.422 s | 0.376–0.385 s | 0.383–0.387 s | 0.434–0.437 s |
+| 1024×1024 | 3.02–3.17 s | 3.12–3.63 s | 2.46–2.84 s | 2.33–2.40 s | 2.44–2.49 s |
+
+- **Threads help here, a little, on large arrays.** At 1024, 6 threads factorize 1.3× faster than 1. On the laptop, all 8 threads were 2–10× *slower*. Every core here is the same kind, which supports §6.4's explanation: work landing on the laptop's low-power cores.
+- **Small arrays still prefer 1 thread.** At 256, every extra thread slows the factorization.
+- **With GNDO, threads barely matter.** In the sweeps (1 thread ÷ more threads, at 1024):
+  - AMD on 6 threads: factorization 1.33×, total 1.14×;
+  - GNDO on 6 threads: factorization 1.08×, total only 1.01×;
+  - 2 threads, either ordering: total within 4%, as on the laptop.
+- **So `blas_threads = 1` stays a sound default.** Its cost to the default solver here is about 1%.
+
+### 7.4 SPICE fails at 1024×1024
+
+**What happens.** Both seeds fail the same way, after about 290 s each:
+1. KLU reports `singular matrix: check node 0` on the first Newton step.
+2. Every fallback then fails in turn: dynamic gmin stepping, true gmin stepping, source stepping, and the transient op ("timestep too small").
+3. ngspice ends with "The operating point could not be simulated successfully" after 373 iterations.
+
+**The cause is the matrix's size, not the devices or Newton.** Three single-run probes (seed 0, not part of the sweeps):
+
+| circuit | outcome | Newton iterations | matrix nonzeros | L+U fill-in | reorder | factor | ngspice size |
+|---|---|---|---|---|---|---|---|
+| linear 512×512 (devices → $R_{min}$) | converged | 3 | 2.10M | 41.1M | 13.1 s | 5.8 s | 1.7 GB |
+| **linear 1024×1024** | **fails, "singular matrix"** | 373 | 8.39M | — | 7.4 s | **0 s** | 4.7 GB |
+| crossbar 768×768 | converged | 4 | 4.72M | 116.9M | 60.8 s | 57.5 s | 6.3 GB |
+
+- **A plainly nonsingular circuit fails too.** A linear crossbar of resistors fails at 1024 exactly like the nonlinear one, so neither the devices nor Newton is the cause.
+- **KLU gives up before factorizing.** At 1024 its reorder phase stops after 7.4 s (61 s at 768), and the numeric factorization never runs. Memory was not exhausted: ngspice stayed under 9 GB, with at least 11 GB free.
+- **Most likely an internal size limit in ngspice's KLU**, which ngspice reports as a singular matrix. A guess, unverified: at 768 the factors hold ~122M entries, about 1.5 GB at 12 bytes each. Extrapolating the fill to 1024 gives ~250M entries, about 3 GB. So a 2 GB (2³¹-byte) limit somewhere in ngspice's 32-bit KLU would sit between the two. Confirming it would take ngspice's source and a debug build.
+- **No fallback.** ngspice's other matrix solver, SPARSE, is no alternative: it did not finish 256×256 in 10 minutes (§3).
+- **What it means for the project's hypothesis.** SPICE does stop working before Spingarn does, between 768×768 and 1024×1024 on this setup. But it stops because of a linear-solver implementation limit, not because the iteration fails to converge. A 64-bit KLU build would most likely get further, at a cost growing as §7.5 shows.
+
+**Two bugs this exposed, now fixed** in [algorithms/spice.py](algorithms/spice.py):
+- **Failures were recorded as Python errors.** After a failed analysis, ngspice's `rusage` prints an internal error, which PySpice raised as an exception. The first 1024 run was therefore recorded as an `error`, not a non-convergence. The statistics are now read even when that happens.
+- **Total failure was not recognized.** ngspice leaves an operating-point plot behind even when every fallback fails, and `op_method` would have labelled such a run "newton". It now reports `failed`, and the run is `not_converged` without reading that plot. [testing/test_spice.py](testing/test_spice.py) checks the new case.
+
+### 7.5 Spingarn vs SPICE
+
+**Total runtime (s)**, mean over 3 seeds:
+
+| size | `spingarn` (CHOLMOD · GNDO) | `spingarn_slu` (SuperLU · MMD) | SPICE · KLU | SPICE ÷ `spingarn` |
+|---|---|---|---|---|
+| 16×16 | 0.0024 | 0.0023 | 0.022 | 9.2× |
+| 64×64 | 0.014 | 0.021 | 0.21 | 15× |
+| 256×256 | 0.26 | 0.67 | 5.24 | 20× |
+| 512×512 | 1.13 | 4.44 | 39.8 | 35× |
+| 768×768 | 2.53 | 12.1 | 145 | **57×** |
+| 1024×1024 | 4.78 | 31.2 | fails | — |
+
+**Peak resident memory (GB):**
+
+| size | `spingarn` | SPICE · KLU | ratio |
+|---|---|---|---|
+| 256×256 | 0.22 | 0.80 | 3.7× |
+| 512×512 | 0.58 | 3.06 | 5.3× |
+| 768×768 | 1.22 | 7.06 | 5.8× |
+
+- **Spingarn is faster at every size, and its lead grows.** Over 128–768, SPICE's runtime grows as $N^{1.40}$, `spingarn`'s as $N^{1.04}$. The 9× at 16×16 is mostly SPICE's fixed overhead: netlist generation and loading.
+- **Where SPICE's time goes** at 768×768:
+  - 15 s loading the netlist;
+  - 121 s in the analysis, almost all of it KLU: 59.5 s reordering, 54.9 s factorizing.
+- **KLU's fill grows faster than GNDO's.** As a multiple of its matrix's nonzeros, KLU's L+U grows 4.2× → 14.2× → 25.8× at 16 / 256 / 768. CHOLMOD/GNDO's $L + L^T$ grows 4.6× → 10.9× → 14.1×.
+- **The structural difference.** Newton changes the Jacobian at every iteration, so SPICE refactorizes each time. Spingarn's matrix $A\Gamma^{-1}A^T$ is fixed, so it factorizes once (0.94 s at 768). Each Spingarn iteration then costs a triangular solve plus $O(n)$ work.
+- **Iteration counts are flat for both.** SPICE takes 4 Newton iterations at every size up to 768, and Spingarn 5. The scaling difference is all in the linear algebra.
+- **Accuracy is comparable here, contrary to §3.5.** The worst KCL residuals are:
+  - SPICE (RELTOL 1e-3): 5e-12 to 1e-11 at 16–32, then 3e-10 to 1.5e-8 from 64 to 768;
+  - Spingarn (tol 1e-9): 1e-10 to 8e-8 across all sizes.
+
+  The two are of the same order from 64×64 up, so these runtimes are close to an equal-accuracy comparison. Formally aligning the tolerances (§4.1) is still open.
+
+### 7.6 Next steps
+
+1. **Decide how to present the 1024 failure.** It is real for the standard ngspice-47 Windows build, but it is an implementation limit, not a convergence failure. Before claiming that SPICE fails at scale, a 64-bit KLU build of ngspice (or Xyce) would tell whether SPICE merely becomes very slow.
+2. **2048×2048 with Spingarn.** At 1024, `spingarn` peaks at 2.1 GB, so on this 32 GB machine 2048 should fit easily (§6.6 estimates ~8 GB).
+3. **Per-iteration overhead** remains the main lever for `spingarn` (§6.6 item 1): at 1024, its 5 iterations take 2.4 s, against 1.9 s for the factorization.
+
+### 7.7 Files changed (2026-10-09)
+
+| file | change |
+|---|---|
+| [algorithms/spice.py](algorithms/spice.py) | `rusage` survives ngspice's error after a failed analysis; `op_method` reports `failed`; a failed analysis returns not converged without reading the leftover plot |
+| [testing/test_spice.py](testing/test_spice.py) | `op_method` test covers total failure |
+| [compare_factorizations.py](compare_factorizations.py) | SPICE runs join the runtime, iteration, KCL and memory tables, with a SPICE time/fill breakdown and SPICE ÷ Spingarn ratios; failed runs are listed and marked in the figure; runtime and memory scaling exponents; tick labels only at powers of two |
+| report_assets/desktop_comparison.png | new figure for §7 |
+| memory/ | `ngspice-baseline-findings.md`, `measurement-machine.md`, `python-environment.md` updated |

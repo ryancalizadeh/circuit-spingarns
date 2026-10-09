@@ -75,6 +75,13 @@ def test_op_method_from_ngspice_notes():
                       "Note: Starting true gmin stepping", "Warning: True gmin stepping failed",
                       "Note: Starting source stepping", "Warning: source stepping failed",
                       "Note: Transient op started", "Note: Transient op finished successfully"]) == "transient op"
+    # every fallback failing, as at 1024x1024 with KLU
+    assert op_method(["Warning: singular matrix:  check node 0", "Note: Starting dynamic gmin stepping",
+                      "Warning: Dynamic gmin stepping failed", "Note: Starting true gmin stepping",
+                      "Warning: True gmin stepping failed", "Note: Starting source stepping",
+                      "Warning: source stepping failed", "Note: Transient op started",
+                      "Error: Transient op failed, timestep too small",
+                      "Error: The operating point could not be simulated successfully."]) == "failed"
 
 
 def test_runs_in_the_experiment_runner():
