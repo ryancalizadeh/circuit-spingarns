@@ -4,7 +4,9 @@ DC operating point of the crossbar from ngspice, driven through PySpice's shared
 The netlist is written as text rather than through PySpice's Circuit API: at 256x256 the Circuit API spends ~3 s of
 pure Python building element objects against ~0.1 s for text, and that overhead would be timed as SPICE runtime.
 Node w{r}_{c} / b{r}_{c} is Config's word / bit node (r, c), and s{r} is the internal node between source E[r] and
-its series resistance. Each device is a behavioral current source carrying eq. (11).
+its series resistance. Each memristor is a behavioral current source carrying eq. (11), with its own cell's R_min and
+R_max; a 1D1R cell applies it to max(v, 0) through ngspice's uramp. A 1S1R cell is two behavioral sources in series
+through an internal node m{r}_{c}: the selector of devices.py from w{r}_{c} to m{r}_{c}, and the memristor on to b{r}_{c}.
 """
 import logging
 import os
@@ -38,18 +40,37 @@ def ngspice():
     return _ngspice
 
 
+def _ramp(x, delta):
+    """ngspice expression for devices._ramp of the expression x: max(x, 0), rounded quadratically over |x| < delta."""
+    if delta == 0:
+        return f"uramp({x})"
+    d = repr(float(delta))
+    return f"(uramp({x}+{d})*uramp({x}+{d})-uramp({x}-{d})*uramp({x}-{d}))/{4 * float(delta)!r}"
+
+
 def netlist(cfg, options=()):
     """SPICE netlist of the crossbar described by `cfg`, with the given `.options` entries and an `.op` analysis."""
     p, q = cfg.p, cfg.q
-    g_lin, g_tanh = repr(1 / float(cfg.R_max)), repr(1 / float(cfg.R_min) - 1 / float(cfg.R_max))
+    g_lin = (1 / cfg.R_max_cell).reshape(p, q)
+    g_tanh = (1 / cfg.R_min_cell - 1 / cfg.R_max_cell).reshape(p, q)
+    # the memristor's voltage: across the cell, beyond the selector in a 1S1R cell, through ngspice's uramp in a 1D1R
+    x = {"memristor": "V(w{r}_{c},b{r}_{c})", "1d1r": "uramp(V(w{r}_{c},b{r}_{c}))",
+         "1s1r": "V(m{r}_{c},b{r}_{c})"}[cfg.device]
+    tail = "m" if cfg.device == "1s1r" else "w"  # the memristor's word-side node
     R_wire, R_source, R_load = repr(float(cfg.R_wire)), repr(float(cfg.R_source)), repr(float(cfg.R_load))
     lines = [f".title crossbar {p}x{q} seed={cfg.seed}"]
     lines += [f"V{r} s{r} 0 {float(cfg.E[r])!r}" for r in range(p)]
     lines += [f"RS{r} s{r} w{r}_0 {R_source}" for r in range(p)]
     lines += [f"RW{r}_{c} w{r}_{c} w{r}_{c + 1} {R_wire}" for r in range(p) for c in range(q - 1)]
     lines += [f"RB{r}_{c} b{r}_{c} b{r + 1}_{c} {R_wire}" for r in range(p - 1) for c in range(q)]
-    lines += [f"B{r}_{c} w{r}_{c} b{r}_{c} I={g_lin}*V(w{r}_{c},b{r}_{c})+{g_tanh}*tanh(V(w{r}_{c},b{r}_{c}))"
-              for r in range(p) for c in range(q)]
+    lines += [f"B{r}_{c} {tail}{r}_{c} b{r}_{c} I={float(g_lin[r, c])!r}*{xrc}+{float(g_tanh[r, c])!r}*tanh({xrc})"
+              for r in range(p) for c in range(q) for xrc in [x.format(r=r, c=c)]]
+    if cfg.device == "1s1r":
+        vs = "V(w{r}_{c},m{r}_{c})"
+        V_th = repr(float(cfg.V_th))
+        selector = (f"I={1 / float(cfg.R_off)!r}*{vs}+{1 / float(cfg.R_on) - 1 / float(cfg.R_off)!r}*"
+                    f"({_ramp(f'{vs}-{V_th}', cfg.delta)}-{_ramp(f'-{vs}-{V_th}', cfg.delta)})")
+        lines += [f"BS{r}_{c} w{r}_{c} m{r}_{c} " + selector.format(r=r, c=c) for r in range(p) for c in range(q)]
     lines += [f"RL{c} b{p - 1}_{c} 0 {R_load}" for c in range(q)]
     if options:
         lines.append(".options " + " ".join(options))

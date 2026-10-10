@@ -5,3 +5,6 @@
 - [Python environment](python-environment.md) — use venv/ (numpy, scipy, matplotlib, PySpice, cvxopt for CHOLMOD); ngspice works on the desktop, not installed on the laptop; cvxopt quirks
 - [Prior work](prior-work.md) — the wave-digital Scattering Iterative Method (Bernardini et al. 2018) is essentially this algorithm; position novelty claims against it
 - [Measurement machine](measurement-machine.md) — two machines: 8-core Lunar Lake laptop (15.5 GB, multithreaded BLAS slows CHOLMOD) and 6-core i5 PC (31.8 GB, threads help a little at 1024); always name the machine, never "this machine"; never compare across them
+- [1D1R findings](diode-1d1r-findings.md) — leakless 1D1R: alpha=1 fails, iterations grow with size under R_min matching (all-reverse rows), oracle open-circuit matching restores ~30 flat; tanh not exercised >= 64x64; SPICE (plain Newton, 6-12 its) beats it from ~128x128
+- [1S1R findings](selector-1s1r-findings.md) — threshold selector + memristor: the knee doesn't hurt Newton; at scale Spingarn (sector-matched, ~110/~220 its flat) beats SPICE from 512 (1.9-2.6x), SPICE hits the KLU limit at 768
+- [TODO: sinh devices](todo-sinh-devices.md) — deferred by the user: exponential i ~ sinh(beta v) memristor as the next candidate where Newton may struggle

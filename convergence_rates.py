@@ -20,7 +20,7 @@ import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
 from Config import BranchKind, Config
-from algorithms.spingarns import SpingarnSolver, contraction_bound, device_resolvent, port_resistances
+from algorithms.spingarns import SpingarnSolver, cell_resolvent, contraction_bound, port_resistances, reflection
 from plotting import GRID, INK, INK_2, MUTED, SERIES_COLORS, SURFACE
 from testing.test_config import solve as newton
 
@@ -42,14 +42,15 @@ def iterate(cfg, gamma, alpha, iterations, a_star):
     Gamma^{-1} norm), the solver's relative fixed-point residual, and max |v| over devices."""
     A, AT, lu = factorize(cfg, gamma)
     d = cfg.slices[BranchKind.DEVICE]
-    lin_gain = cfg.r_hi / (cfg.r_hi + gamma)
+    lin_gain = 1 / (1 + gamma / cfg.r_hi)
     lin_offset = gamma * cfg.emf / (cfg.r_hi + gamma)
     weight = 1 / gamma
     norm = lambda x: np.sqrt((x * x) @ weight)
     a, v = np.zeros(cfg.num_branches), np.zeros(cfg.num_branches)
+    warm = None if cfg.device == "1s1r" else v[d]
     out = {key: [] for key in ("residual", "error", "solver_residual", "v_dev_max")}
     for _ in range(iterations):
-        v_dev, _ = device_resolvent(a[d], gamma[d], cfg.R_min, cfg.R_max, v[d])
+        v_dev, _, warm = cell_resolvent(cfg, a[d], gamma[d], warm)
         v = lin_gain * a + lin_offset
         v[d] = v_dev
         b = 2 * v - a
@@ -67,8 +68,9 @@ def linearized_rate(cfg, gamma, alpha, v_star):
     D = diag((R_e - gamma_e) / (R_e + gamma_e)) at the solution's incremental resistances R_e: the asymptotic rate.
     Also returns max |D_e|, the operator-norm bound on that Jacobian in the scaled waves."""
     A, AT, lu = factorize(cfg, gamma)
-    R = 1 / cfg.conductance(v_star)
-    D = (R - gamma) / (R + gamma)
+    with np.errstate(divide="ignore"):
+        R = 1 / cfg.conductance(v_star)  # inf on reverse-biased 1D1R cells
+    D = reflection(R, gamma)
     M = AT @ lu.solve((A @ sp.diags(1 / gamma)).toarray())  # dense m x m projector
     J = (1 - alpha) * np.eye(cfg.num_branches) + alpha * (2 * M - np.eye(cfg.num_branches)) * D[None, :]
     return float(np.abs(np.linalg.eigvals(J)).max()), float(np.abs(D).max())

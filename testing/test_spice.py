@@ -39,6 +39,38 @@ def test_matches_newton_reference():
         assert out.history["kcl_residual_rel"] < 1e-9
 
 
+def test_1d1r_matches_newton_reference():
+    """1D1R cells (uramp in the behavioral source) with per-cell resistances and signed inputs: SPICE's operating point
+    agrees with Newton's."""
+    solver = SpiceSolver()
+    for p, q in [(1, 1), (3, 4), (16, 32)]:
+        cfg = Config(p, q, seed=p * 100 + q, device="1d1r", E_range=(-1, 1.5), R_min=(1e3, 1e4), R_max=(5e4, 2e5))
+        assert netlist(cfg).count("uramp(") == 2 * p * q
+        out = solver.solve(cfg)
+        u_ref, _ = newton(cfg)
+        v_ref = cfg.incidence().T @ u_ref
+        assert out.converged, (p, q, out.history)
+        assert np.abs(out.v - v_ref).max() < 1e-8, (p, q)
+
+
+def test_1s1r_matches_newton_reference():
+    """1S1R cells, each a selector and a memristor in series through an internal node, with a rounded knee and with the
+    kink: SPICE's operating point agrees with Newton's."""
+    solver = SpiceSolver()
+    for delta in (0.05, 0.0):
+        for p, q in [(1, 1), (3, 4), (8, 8)]:
+            cfg = Config(p, q, seed=p * 100 + q, device="1s1r", E_range=(-1, 1.5), R_min=(1e3, 1e4),
+                         R_max=(5e4, 2e5), R_on=1e3, R_off=1e6, V_th=0.5, delta=delta)
+            text = netlist(cfg)
+            assert sum(line.startswith("BS") for line in text.splitlines()) == p * q
+            assert sum(line.startswith("B") for line in text.splitlines()) == 2 * p * q
+            out = solver.solve(cfg)
+            u_ref, _ = newton(cfg)
+            v_ref = cfg.incidence().T @ u_ref
+            assert out.converged, (p, q, delta, out.history)
+            assert np.abs(out.v - v_ref).max() < 1e-8, (p, q, delta)
+
+
 def test_sparse_matrix_solver_agrees():
     cfg = Config(8, 8, seed=5)
     klu = SpiceSolver().solve(cfg)

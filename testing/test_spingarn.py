@@ -36,6 +36,67 @@ def test_matches_newton_reference():
             assert out.history["kvl_residual_rel"] <= 1e-9
 
 
+def test_1d1r_matches_newton_reference():
+    """On 1D1R crossbars with signed inputs and per-cell resistances, the averaged iteration (alpha < 1, which is what
+    guarantees convergence without a leak) agrees with Newton, for every port-resistance rule; reverse-biased cells
+    carry exactly zero current. The a priori bound is 1: open cells reflect fully."""
+    for p, q in [(1, 1), (3, 4), (8, 8), (16, 32)]:
+        cfg = Config(p, q, seed=p * 100 + q, device="1d1r", E_range=(-1, 1.5), R_min=(1e3, 1e4), R_max=(5e4, 2e5))
+        u_ref, _ = newton(cfg)
+        v_ref = cfg.incidence().T @ u_ref
+        d = cfg.slices[BranchKind.DEVICE]
+        for kwargs in [dict(gamma=gamma, alpha=alpha) for gamma in ["r_lo", "geometric", 3e3] for alpha in [0.5, 0.8]]:
+            out = SpingarnSolver(max_iterations=5000, **kwargs).solve(cfg)
+            assert out.converged, (p, q, kwargs)
+            assert np.abs(out.v - v_ref).max() < 1e-7 * np.abs(v_ref).max(), (p, q, kwargs)
+            assert np.all(out.i[d][out.v[d] <= 0] == 0)
+            assert out.history["contraction_bound"] == 1.0
+
+
+SELECTOR = dict(device="1s1r", E_range=(-1, 1.5), R_min=(1e3, 1e4), R_max=(5e4, 2e5), R_on=1e3, R_off=1e6, V_th=0.5)
+
+
+def test_1s1r_matches_newton_reference():
+    """On 1S1R crossbars, with a rounded knee and with the kink, Spingarn agrees with Newton for both matchings. The
+    cell's sector is bounded, so alpha = 1 contracts; with geometric matching the a priori bound is the worst cell's
+    (sqrt K - 1) / (sqrt K + 1), K = (R_off + R_max) / (R_on + R_min), whatever delta."""
+    for delta in (0.05, 0.0):
+        for p, q in [(1, 1), (3, 4), (8, 8)]:
+            cfg = Config(p, q, seed=p * 100 + q, delta=delta, **SELECTOR)
+            u_ref, _ = newton(cfg)
+            v_ref = cfg.incidence().T @ u_ref
+            d = cfg.slices[BranchKind.DEVICE]
+            K = (cfg.R_off + cfg.R_max_cell) / (cfg.R_on + cfg.R_min_cell)
+            for kwargs in [dict(gamma="geometric"), dict(gamma="geometric", alpha=0.5), dict(gamma="r_lo")]:
+                out = SpingarnSolver(**kwargs).solve(cfg)
+                assert out.converged, (p, q, delta, kwargs)
+                assert np.abs(out.v - v_ref).max() < 1e-8 * np.abs(v_ref).max(), (p, q, delta, kwargs)
+                assert np.allclose(out.i[d], cfg.current(out.v)[d], rtol=1e-9, atol=1e-15)
+            bound = SpingarnSolver(gamma="geometric", max_iterations=1).solve(cfg).history["contraction_bound"]
+            assert np.isclose(bound, np.max((np.sqrt(K) - 1) / (np.sqrt(K) + 1)), rtol=1e-12)
+
+
+def test_series_resolvent():
+    """devices.series_solve solves v_s + v_m + gamma i = a with i = g_s(v_s) = g_m(v_m), from deep reverse bias through
+    the selector's knee to deep forward bias, for knees from soft to a kink and port resistances from tiny to huge,
+    cold or warm-started from anywhere."""
+    from devices import memristor_current, selector_current, series_solve
+    rng = np.random.default_rng(2)
+    n = 4000
+    a = np.concatenate([rng.normal(scale=3, size=n - 6), [0.0, 0.5, -0.5, 0.5 + 1e-12, 1e-300, 50.0]])
+    R_min, R_max = np.exp(rng.uniform(np.log(1e3), np.log(1e4), n)), np.exp(rng.uniform(np.log(5e4), np.log(2e5), n))
+    for delta in (0.1, 1e-3, 0.0):
+        for gamma in (1.0, 3e3, 1e5, 1e8):
+            args = (gamma, R_min, R_max, 1e3, 1e6, 0.5, delta)
+            for x0 in (None, (rng.normal(size=n), rng.normal(size=n))):
+                v, i, v_s, v_m, steps = series_solve(a, *args, x0=x0)
+                scale = np.abs(v_s) + np.abs(v_m) + gamma * np.abs(i) + np.abs(a)
+                assert np.all(np.abs(v + gamma * i - a) <= 1e-11 * scale), (delta, gamma)
+                assert np.allclose(selector_current(v_s, 1e3, 1e6, 0.5, delta), i, rtol=1e-11, atol=1e-18)
+                assert np.allclose(memristor_current(v_m, R_min, R_max), i, rtol=1e-11, atol=1e-18)
+                assert np.all(np.sign(v) == np.sign(a)) and np.array_equal(v, v_s + v_m) and steps <= 100
+
+
 def test_factorize_solves_in_any_ordering():
     """Both factorizations solve the nodal system in the library's ordering, in the nested-dissection ordering and in an
     arbitrary one, so the permutation bookkeeping is right whatever the ordering."""
@@ -105,14 +166,41 @@ def test_device_resolvent_solves_its_equation():
             assert np.all(np.sign(v) == np.sign(a)) and steps <= 10
 
 
+def test_device_resolvent_with_diode():
+    """For a 1D1R cell, v + gamma g_m(max(v, 0)) = a: v = a when a <= 0 (the cell is open), the memristor's root when
+    a > 0; per-device parameters broadcast."""
+    rng = np.random.default_rng(1)
+    n = 5000
+    a = np.concatenate([rng.normal(scale=20, size=n - 4), [0.0, -1e-300, 1e-300, 1e-9]])
+    R_min, R_max = np.exp(rng.uniform(np.log(1e3), np.log(1e4), n)), np.exp(rng.uniform(np.log(5e4), np.log(2e5), n))
+    gamma = R_min * rng.uniform(0.1, 10, n)
+    v, _ = device_resolvent(a, gamma, R_min, R_max, rng.normal(size=n), diode=True)
+    x = np.maximum(v, 0)
+    i = x / R_max + (1 / R_min - 1 / R_max) * np.tanh(x)
+    assert np.all(v[a <= 0] == a[a <= 0]) and np.all(v[a > 0] > 0)
+    assert np.all(np.abs(v + gamma * i - a) <= 4 * np.finfo(float).eps * (np.abs(v) + gamma * i + np.abs(a)))
+    plain, _ = device_resolvent(a, gamma, R_min, R_max, np.zeros(n))
+    assert np.allclose(v[a > 0], plain[a > 0], rtol=1e-14, atol=0)  # same root from another warm start
+
+
 def test_port_resistances():
-    """Linear branches are matched exactly by every rule; only the devices' port resistance depends on it."""
+    """Linear branches are matched exactly by every rule; only the devices' port resistance depends on it, cell by cell
+    when the cells have their own resistances."""
     cfg = Config(3, 4, seed=0)
     d = cfg.slices[BranchKind.DEVICE]
     linear = cfg.kind != BranchKind.DEVICE
     for rule, device in [("geometric", 1e4), ("r_lo", 1e3), (2.5e3, 2.5e3)]:
         gamma = port_resistances(cfg, rule)
         assert np.all(gamma[linear] == cfg.r_hi[linear]) and np.allclose(gamma[d], device)
+    for device in ("memristor", "1d1r"):
+        cfg = Config(3, 4, seed=0, R_min=(1e3, 1e4), R_max=(5e4, 2e5), device=device)
+        assert np.array_equal(port_resistances(cfg, "r_lo")[d], cfg.R_min_cell)
+        assert np.allclose(port_resistances(cfg, "geometric")[d], np.sqrt(cfg.R_min_cell * cfg.R_max_cell))
+        assert np.all(port_resistances(cfg, "geometric")[linear] == cfg.r_hi[linear])
+    cfg = Config(3, 4, seed=0, **SELECTOR)  # a 1S1R cell is matched over its own sector
+    lo, hi = 1e3 + cfg.R_min_cell, 1e6 + cfg.R_max_cell
+    assert np.allclose(port_resistances(cfg, "r_lo")[d], lo)
+    assert np.allclose(port_resistances(cfg, "geometric")[d], np.sqrt(lo * hi))
 
 
 def test_matched_linear_circuit_solves_in_one_update():

@@ -39,6 +39,7 @@ import scipy.sparse.linalg as spla
 from cvxopt import cholmod
 
 from Config import BranchKind
+from devices import tanh_root
 from algorithms.common import Solver, SolveOutput, kcl_check
 from algorithms.ordering import nested_dissection
 
@@ -51,53 +52,71 @@ ORDERINGS = ("nested_dissection", "builtin")
 
 def port_resistances(cfg, rule):
     """
-    Gamma's diagonal, one port resistance per branch. Linear branches get their own resistance. Devices, whose
-    incremental resistance ranges over [R_min, R_max], get by `rule`:
+    Gamma's diagonal, one port resistance per branch. Linear branches get their own resistance. Each device, whose
+    incremental resistance ranges over its sector [r_lo, r_hi] (that cell's own values), gets by `rule`:
 
-        "geometric"  sqrt(R_min R_max), which minimizes the worst reflection factor over that whole range;
-        "r_lo"       R_min, their incremental resistance at zero bias;
-        a number     that resistance in ohms.
+        "geometric"  sqrt(r_lo r_hi), which minimizes the worst reflection factor over the whole sector;
+        "r_lo"       r_lo: for a memristor or 1D1R cell R_min, the memristor's incremental resistance at zero bias;
+                     for a 1S1R cell R_on + R_min, its on state;
+        a number     that resistance in ohms, for every cell.
+
+    A 1D1R cell's sector is unbounded (r_hi = inf), so "geometric" uses its memristor's range [R_min, R_max]. Its rule
+    only matters while the diode conducts: reverse-biased, the cell is open and reflects its wave unchanged (factor +1)
+    whatever its port resistance.
     """
     gamma = cfg.r_hi.copy()  # r_lo = r_hi = R on linear branches
     d = cfg.slices[BranchKind.DEVICE]
     if rule == "geometric":
-        gamma[d] = np.sqrt(cfg.R_min * cfg.R_max)
+        gamma[d] = np.sqrt(cfg.r_lo[d] * np.where(np.isinf(cfg.r_hi[d]), cfg.R_max_cell, cfg.r_hi[d]))
     elif rule == "r_lo":
-        gamma[d] = cfg.R_min
+        gamma[d] = cfg.r_lo[d]
     else:
         gamma[d] = float(rule)
     return gamma
 
 
+def reflection(R, gamma):
+    """Reflection factor (R - gamma) / (R + gamma) of a branch of incremental resistance R at port resistance gamma;
+    +1 for R = inf (an open circuit)."""
+    with np.errstate(invalid="ignore"):
+        return np.where(np.isinf(R), 1.0, (R - gamma) / (R + gamma))
+
+
 def contraction_bound(cfg, gamma, alpha):
-    """A priori bound on the factor by which each iteration shrinks the distance to the fixed point (see above)."""
-    rho = np.maximum(np.abs(cfg.r_lo - gamma) / (cfg.r_lo + gamma), np.abs(cfg.r_hi - gamma) / (cfg.r_hi + gamma))
+    """A priori bound on the factor by which each iteration shrinks the distance to the fixed point (see above). It is
+    1 for 1D1R cells, whose reverse-biased diodes reflect fully: no rate is guaranteed then, only convergence, and only
+    for alpha < 1."""
+    rho = np.maximum(np.abs(reflection(cfg.r_lo, gamma)), np.abs(reflection(cfg.r_hi, gamma)))
     return float(1 - alpha + alpha * rho.max())
 
 
-def device_resolvent(a, gamma, R_min, R_max, v0):
+def device_resolvent(a, gamma, R_min, R_max, v0, diode=False):
     """
-    J_{gamma T}(a) for devices, elementwise: the root v of c v + d tanh(v) = a with c = 1 + gamma / R_max and
-    d = gamma (1 / R_min - 1 / R_max), by Newton's method from the warm start v0. Returns v and the number of steps.
+    J_{gamma T}(a) for memristors, elementwise: the root v of c v + d tanh(v) = a with c = 1 + gamma / R_max and
+    d = gamma (1 / R_min - 1 / R_max), by Newton's method from the warm start v0 (devices.tanh_root). Returns v and the
+    number of steps. gamma, R_min and R_max may be scalars or per-device arrays.
 
-    The root has the sign of a, and x = |v| lies in [lo, hi] below. The left side is concave in x >= 0, so a Newton step
-    from anywhere in [lo, hi], clipped to it, lands at or below the root, and from there the steps rise monotonically to
-    it.
+    With diode=True the device is a 1D1R cell, i = g_m(max(v, 0)), and the equation is v + gamma g_m(max(v, 0)) = a: for
+    a <= 0 the cell is open and v = a; for a > 0 the root is the memristor's.
     """
     c = 1 + gamma / R_max
     d = gamma * (1 / R_min - 1 / R_max)
-    sign, target = np.sign(a), np.abs(a)
-    lo = np.maximum(target / (c + d), (target - d) / c)  # tanh x <= x and tanh x < 1
-    hi = target / c  # tanh x >= 0
-    x = np.clip(np.abs(v0), lo, hi)
-    for steps in range(1, 101):
-        t = np.tanh(x)
-        x_new = np.clip(x - (c * x + d * t - target) / (c + d * (1 - t * t)), lo, hi)
-        done = np.all(np.abs(x_new - x) <= 1e-12 * x_new)  # convergence is quadratic: x_new is exact to rounding
-        x = x_new
-        if done:
-            return sign * x, steps
-    raise RuntimeError("device resolvent: Newton's method did not converge")
+    # reverse-biased 1D1R cells solve for v = 0 at once and are overwritten below
+    v, steps = tanh_root(c, d, np.maximum(a, 0.0) if diode else a, v0)
+    return (np.where(a > 0, v, a) if diode else v), steps
+
+
+def cell_resolvent(cfg, a, gamma, warm):
+    """
+    J_{gamma T}(a) on cfg's pq cells, whatever their device: the cell voltages, the steps taken, and the warm start for
+    the next call. warm is the previous cell voltages, or for 1S1R cells the previous (selector, memristor) voltages or
+    None; a 1S1R cell's resolvent is devices.series_solve.
+    """
+    if cfg.device == "1s1r":
+        v, _, v_s, v_m, steps = cfg.series_solve(a, gamma, warm)
+        return v, steps, (v_s, v_m)
+    v, steps = device_resolvent(a, gamma, cfg.R_min_cell, cfg.R_max_cell, warm, diode=cfg.device == "1d1r")
+    return v, steps, v
 
 
 class _CholmodFactor(ctypes.Structure):
@@ -297,9 +316,12 @@ class SpingarnSolver(Solver):
         history["contraction_bound"] = contraction_bound(cfg, gamma, alpha)
 
         d = cfg.slices[BranchKind.DEVICE]
-        lin_gain = cfg.r_hi / (cfg.r_hi + gamma)  # J_{gamma T}(a) = lin_gain * a + lin_offset on linear branches
+        # J_{gamma T}(a) = lin_gain * a + lin_offset on linear branches; written to stay finite where r_hi = inf (1D1R
+        # cells, whose entries are overwritten by the device resolvent anyway)
+        lin_gain = 1 / (1 + gamma / cfg.r_hi)
         lin_offset = gamma * cfg.emf / (cfg.r_hi + gamma)
         weight = 1 / gamma
+        warm = None if cfg.device == "1s1r" else np.zeros(cfg.p * cfg.q)
         a = np.zeros(cfg.num_branches)
         w = np.zeros(cfg.num_nodes)  # node potentials of M a
         v = np.zeros(cfg.num_branches)
@@ -308,7 +330,7 @@ class SpingarnSolver(Solver):
         t = time.perf_counter()
         for k in range(self.max_iterations):
             # 1) scattering at the branches
-            v_dev, steps = device_resolvent(a[d], gamma[d], cfg.R_min, cfg.R_max, v[d])
+            v_dev, steps, warm = cell_resolvent(cfg, a[d], gamma[d], warm)
             newton_steps += steps
             v = lin_gain * a + lin_offset
             v[d] = v_dev
@@ -323,7 +345,9 @@ class SpingarnSolver(Solver):
 
             # (v, i) against KCL and KVL, through the node potentials u of M v = (M a + M b) / 2
             u = (w + u_b) / 2
-            v_u, _, kcl_ok, kcl_abs, kcl_rel = kcl_check(cfg, u, self.tol, abstol, A)
+            # 1S1R cells: warm-start the test's series solve from this iteration's cell states
+            v_u, _, kcl_ok, kcl_abs, kcl_rel = kcl_check(cfg, u, self.tol, abstol, A,
+                                                         warm if cfg.device == "1s1r" else None)
             v_max, kvl_abs = np.abs(v).max(), np.abs(v - v_u).max()
             kcl.append(kcl_rel)
             kvl.append(float(kvl_abs / v_max) if v_max > 0 else 0.0)
