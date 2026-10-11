@@ -1,4 +1,5 @@
 - [Working feedback style](working-feedback-style.md) — user wants running narration: what's being checked, what broke, what was tried, how it went
+- [Report format](report-format.md) — write-ups as report_<topic>.md + report_assets/<topic>/ PNGs from a <topic>_figures.py script, not artifact pages
 - [Project goals](project-goals.md) — compare SPICE and the custom Spingarn partial-inverses algorithm on non-ideal memristive crossbar arrays, especially scaling and convergence at large sizes
 - [ngspice baseline findings](ngspice-baseline-findings.md) — transient-op fallback fakes success, ITL1 floor of 100, SPARSE vs KLU scaling, flat 4 Newton iterations; KLU fails at 1024x1024 (size limit, not convergence), don't rerun
 - [Spingarn solver findings](spingarn-solver-findings.md) — iterations flat 1x1→1024x1024 (5 r_lo / ~90 geometric); since 2026-10-08 CHOLMOD + geometric nested dissection is the default (6.2x faster than legacy SuperLU `spingarn_slu` at 1024), per-iteration overhead now dominates

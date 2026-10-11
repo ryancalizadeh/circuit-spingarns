@@ -13,7 +13,7 @@ PySpice is installed only because `algorithms/__init__.py` imports `SpiceSolver`
 
 CHOLMOD comes from cvxopt, because SciPy has no Cholesky and scikit-sparse ships only a source package for Windows (the laptop has no compiler, conda or vcpkg; the PC was not checked). cvxopt's CHOLMOD (SuiteSparse 7.11, 64-bit indices) is compiled without METIS, so its only own ordering is AMD. It bundles its own OpenBLAS 0.3.31 at `cvxopt/.libs/libopenblas.dll`, separate from numpy's and scipy's, which is how `algorithms/spingarns.py` sets CHOLMOD's thread count. Quirks: `cholmod.symbolic(A, p=None)` is rejected (omit `p` instead), and `cvxopt.matrix` rejects int64 arrays whose buffer format is `<q` (arrays built from ctypes); plain numpy int64 (`q`) works.
 
-Node.js is not installed either, so the dataviz palette validator cannot run.
+Node.js is not installed on the laptop, so the dataviz palette validator cannot run there. The PC has Node 16.15.1 (checked 2026-10-10), which loads the validator's `.js` as CommonJS and fails; it runs when copied, still named `validate_palette.js` (its CLI check matches that filename), into a scratch folder holding `package.json` = `{"type":"module"}`.
 
 **Why:** finding a working interpreter cost a full search in the 2026-10-06 session, and finding a CHOLMOD binding that installs on Windows/Python 3.14 another in 2026-10-08.
 
