@@ -15,9 +15,15 @@ from algorithms import SOLVERS
 # of algorithms a sweep runs.
 SERIES_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"]
 SURFACE, INK, INK_2, MUTED, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#898781", "#e6e5e0"
+# Slots pinned away from registry order. condat_vu's would be the green, which a protanope cannot tell from spice's orange
+# (CVD Delta E 3.2, checked with the dataviz validator 2026-10-13); the violet passes all pairs beside spingarn, spice and
+# spingarn_sector.
+PINNED_SLOTS = {"condat_vu": 6}
 
 
 def _color(alg, algorithms):
+    if alg in PINNED_SLOTS:
+        return SERIES_COLORS[PINNED_SLOTS[alg]]
     order = list(SOLVERS) + [a for a in algorithms if a not in SOLVERS]
     return SERIES_COLORS[order.index(alg) % len(SERIES_COLORS)]
 
