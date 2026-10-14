@@ -15,6 +15,8 @@ CHOLMOD comes from cvxopt, because SciPy has no Cholesky and scikit-sparse ships
 
 The dataviz skill ships a Python twin of its palette validator (`scripts/validate_palette.py`, found 2026-10-13), which runs on either machine without Node: `venv/Scripts/python.exe -I -X utf8 <skill>/scripts/validate_palette.py "#hex,..." --mode light [--pairs all | --ordinal]` (`-X utf8` because the Windows console can't print its arrows). Node.js is not installed on the laptop. The PC has Node 16.15.1 (checked 2026-10-10), which loads the `.js` version as CommonJS and fails; that one runs when copied, still named `validate_palette.js`, into a scratch folder holding `package.json` = `{"type":"module"}`. Finding with it (2026-10-13): palette slot 6 (green #008300) fails CVD against slot 2 (spice's orange) at Delta E 3.2 (protan), so condat_vu is pinned to slot 7 (violet) in plotting.py.
 
+Scripts that print Greek letters or other non-cp1252 text (e.g. adaptive_matching_figures.py's tables) need `python -X utf8` on Windows, or they raise UnicodeEncodeError on the console. README.md is UTF-16 LE with a BOM and CRLF line endings: edit it by decoding/encoding with Python's 'utf-16', not with plain text tools (2026-10-14).
+
 **Why:** finding a working interpreter cost a full search in the 2026-10-06 session, and finding a CHOLMOD binding that installs on Windows/Python 3.14 another in 2026-10-08.
 
 **How to apply:** use the venv directly. SPICE runs work on both machines now; still compare runtimes only within one machine (see [[measurement-machine]]). If a fresh venv ever lacks ngspice, repeat the DLL recipe above (README "SPICE setup").

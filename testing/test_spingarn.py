@@ -11,8 +11,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from Config import Config, BranchKind
 from algorithms import SOLVERS
 from algorithms.ordering import nested_dissection
-from algorithms.spingarns import (SpingarnCholmodSolver, SpingarnSectorSolver, SpingarnSLUSolver, SpingarnSolver,
-                                  blas_threads, device_resolvent, factorize, port_resistances)
+from algorithms.spingarns import (SpingarnAdaptiveSolver, SpingarnAdaptiveSplitSolver, SpingarnCholmodSolver,
+                                  SpingarnSectorSolver, SpingarnSLUSolver, SpingarnSolver, blas_threads,
+                                  device_resolvent, factorize, port_resistances)
 from run_experiments import run_sweep
 from test_config import solve as newton
 
@@ -113,6 +114,88 @@ def test_factorize_solves_in_any_ordering():
             assert info["factor_nnz"] > 0
             if perm is not None:
                 assert info["ordering_used"] == "nested_dissection"
+
+
+def test_refactor_matches_a_fresh_factorization():
+    """solve.refactor(K2) solves with K2 as a fresh factorization of K2 would, on every factorization and ordering, and
+    CHOLMOD rejects a matrix whose sparsity pattern differs from the one it analysed."""
+    cfg = Config(5, 7, seed=3, R_min=(1e3, 1e4), R_max=(5e4, 2e5))
+    A = cfg.incidence()
+    d = cfg.slices[BranchKind.DEVICE]
+    gamma = port_resistances(cfg, "r_lo")
+    K = A @ sp.diags(1 / gamma) @ A.T
+    gamma2 = gamma.copy()
+    gamma2[d] = np.where(np.arange(cfg.p * cfg.q) % 3 == 0, 1e8, gamma[d] * 2)
+    K2 = A @ sp.diags(1 / gamma2) @ A.T
+    rhs = np.random.default_rng(0).standard_normal(cfg.num_nodes)
+    for factorization in ("cholmod", "slu"):
+        for perm in (None, nested_dissection(cfg)):
+            solve, _ = factorize(K, factorization, perm)
+            solve.refactor(K2)
+            fresh, _ = factorize(K2, factorization, perm)
+            assert np.abs(solve(rhs) - fresh(rhs)).max() < 1e-12 * np.abs(fresh(rhs)).max(), (factorization, perm)
+    solve, _ = factorize(K, "cholmod", nested_dissection(cfg))
+    try:
+        solve.refactor(K + sp.eye(cfg.num_nodes, k=5))
+    except ValueError:
+        return
+    assert False, "refactor accepted a different sparsity pattern"
+
+
+ADAPTIVE = [SpingarnAdaptiveSolver, SpingarnAdaptiveSplitSolver]
+DIODE = dict(device="1d1r", E_range=(-1, 1.5), R_min=(1e3, 1e4), R_max=(5e4, 2e5))
+
+
+def test_adaptive_matches_newton_reference():
+    """Adaptive matching agrees with Newton on 1D1R and 1S1R crossbars (kink and rounded knee), re-matching at least
+    once; open cells carry exactly zero current, and the cells it ends up matching as open are reverse-biased."""
+    circuits = [DIODE, dict(SELECTOR, delta=0.0), dict(SELECTOR, delta=0.05)]
+    for circuit in circuits:
+        for p, q in [(1, 1), (3, 4), (8, 8), (16, 32)]:
+            cfg = Config(p, q, seed=p * 100 + q, **circuit)
+            u_ref, _ = newton(cfg)
+            v_ref = cfg.incidence().T @ u_ref
+            d = cfg.slices[BranchKind.DEVICE]
+            for cls in ADAPTIVE:
+                out = cls().solve(cfg)
+                h = out.history
+                assert out.converged, (p, q, circuit["device"], cls.name)
+                assert np.abs(out.v - v_ref).max() < 1e-7 * np.abs(v_ref).max(), (p, q, circuit["device"], cls.name)
+                assert np.allclose(out.i[d], cfg.current(out.v)[d], rtol=1e-9, atol=1e-15)
+                assert len(h["rematch_log"]) == h["rematches"] and h["refactor_time"] >= 0
+                if p * q > 1:
+                    assert h["rematches"] >= 1, (p, q, circuit["device"], cls.name)
+                if circuit["device"] == "1d1r":
+                    assert np.all(out.i[d][out.v[d] <= 0] == 0)
+                    assert h["open_cells"] <= np.sum(v_ref[d] <= 1e-9)
+                    assert h["open_cells"] > 0 or not np.any(v_ref[d] < -1e-6)
+                else:
+                    assert h["open_cells"] == 0  # a 1S1R cell's sector is bounded: never open
+
+
+def test_adaptive_without_rematches_is_spingarn():
+    """With nothing to re-match (memristors at zero-bias matching), or re-matching switched off, the adaptive solver is
+    SpingarnSolver at the same alpha, to the last bit; with one re-match allowed it re-matches exactly once."""
+    for cfg, alpha in [(Config(16, 16, seed=0), 1.0), (Config(16, 16, seed=0, **DIODE), 0.8)]:
+        ref = SpingarnSolver(alpha=alpha).solve(cfg)
+        limits = [50] if cfg.device == "memristor" else [0]
+        for cls in ADAPTIVE:
+            for limit in limits:
+                out = cls(alpha=alpha, max_rematches=limit).solve(cfg)
+                assert out.history["rematches"] == 0 and out.iterations == ref.iterations
+                assert np.array_equal(out.v, ref.v) and np.array_equal(out.i, ref.i)
+    out = SpingarnAdaptiveSolver(max_rematches=1).solve(Config(16, 16, seed=0, **DIODE))
+    assert out.converged and out.history["rematches"] == len(out.history["rematch_log"]) == 1
+
+
+def test_adaptive_iterations_stay_flat_on_1d1r():
+    """On 1D1R, zero-bias matching slows down as the array grows (reverse-biased rows look like R_min to the network
+    solve); re-matching those cells as open circuits keeps the count nearly flat."""
+    counts = {cls.name: [cls().solve(Config(p, p, seed=0, **DIODE)).iterations for p in (8, 32, 64)]
+              for cls in ADAPTIVE}
+    fixed = SpingarnSolver(alpha=0.8).solve(Config(64, 64, seed=0, **DIODE)).iterations
+    assert max(counts["spingarn_adaptive"]) <= 30 and max(counts["spingarn_adaptive_split"]) <= 20, counts
+    assert fixed > 4 * max(counts["spingarn_adaptive"]), (fixed, counts)
 
 
 def test_backends_agree_and_report_what_they_did():
@@ -243,6 +326,31 @@ def test_rejects_bad_options():
         except ValueError:
             continue
         assert False, f"accepted {kwargs}"
+    for kwargs in [dict(rematch_every=0), dict(rematch_every=1.5), dict(max_rematches=-1), dict(threshold=0),
+                   dict(threshold=1), dict(open_resistance=0), dict(open_alpha=0), dict(open_alpha=1.5), dict(alpha=0)]:
+        try:
+            SpingarnAdaptiveSolver(**kwargs)
+        except ValueError:
+            continue
+        assert False, f"accepted {kwargs}"
+
+
+def test_registered_adaptive_variants():
+    """spingarn_adaptive relaxes every branch by 2/3 and spingarn_adaptive_split only the open cells, by 1/2; both start
+    from zero-bias matching, re-match every 2 iterations at most 50 times, and run in the experiment runner."""
+    assert SOLVERS["spingarn_adaptive"] is SpingarnAdaptiveSolver
+    assert SOLVERS["spingarn_adaptive_split"] is SpingarnAdaptiveSplitSolver
+    keys = ("gamma", "alpha", "open_alpha", "rematch_every", "max_rematches", "factorization", "ordering")
+    assert tuple(SpingarnAdaptiveSolver().options[k] for k in keys) == (
+        "r_lo", 2 / 3, None, 2, 50, "cholmod", "nested_dissection")
+    assert tuple(SpingarnAdaptiveSplitSolver().options[k] for k in keys) == (
+        "r_lo", 1.0, 0.5, 2, 50, "cholmod", "nested_dissection")
+    assert SpingarnSolver().options["alpha"] == 1.0 and SpingarnAdaptiveSplitSolver(open_alpha=0.6).options[
+        "open_alpha"] == 0.6
+    with tempfile.TemporaryDirectory() as tmp:
+        records = run_sweep([(4, 4)], 2, [cls() for cls in ADAPTIVE], tmp, circuit=DIODE, save_pickles=False)
+        assert [r["status"] for r in records] == ["converged"] * 4
+        assert all(r["history"]["rematches"] >= 1 for r in records)
 
 
 def test_registered_variants():

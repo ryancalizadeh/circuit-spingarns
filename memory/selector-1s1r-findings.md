@@ -29,6 +29,8 @@ Scaling sweep (2026-10-09, PC, runner, isolated runs, 3 seeds; delta = 0; result
 - SPICE fails at 768 for 1S1R with the same signature as memristor-only 1024: singular matrix at the first Newton step, factor time 0, all fallbacks fail, ~333 s, ~10 GB. This is the KLU size limit arriving earlier (1.77M equations, ~2x the LU fill). 3/3 seeds at 100k and 1/1 at 1M; the user chose to skip the remaining 1M seeds.
 - Implementation (2026-10-09): Spingarn's KCL check warm-starts the 1S1R series solve from the iterate's cell states (Config.current / kcl_check take x0), and devices.series_solve retires converged cells. Without the latter, the whole array iterated until the slowest cell converged: 5.4 vs 1.7 steps per iteration and 911 vs 348 ms per iteration at 512 (the unoptimized runs are kept in results/selector-scale-Roff100000/unoptimized/).
 
+Update 2026-10-14 (laptop): adaptive matching (`spingarn_adaptive`, alpha 1) cuts the ~108 / ~220 sector iterations to 9-16, flat, and beats SPICE 2.4-6.6x at 16-256; see [[adaptive-matching-findings]].
+
 **Why:** this was proposed as the model where Newton is disadvantaged. It isn't; a bounded-slope monotone kink is benign for Newton.
 
 **How to apply:** don't claim that nonsmooth monotone devices with bounded slopes favour Spingarn on iteration count; its 1S1R win at >= 512 comes from cheap iterations against SPICE's growing refactorization cost, and the 768 result is a SPICE implementation limit. Newton disadvantages come from exponential growth, near-singular Jacobians or non-monotone laws (see [[todo-sinh-devices]]). Related: [[diode-1d1r-findings]], [[spingarn-solver-findings]].

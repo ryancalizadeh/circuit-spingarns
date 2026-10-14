@@ -21,8 +21,11 @@ SURFACE, INK, INK_2, MUTED, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#898781", "
 # The two coordinate-descent variants are one algorithm, so they share a hue and differ in line style. No free slot
 # passed beside spice's orange (amber, pink and red fail the normal-vision floor); the teal passes every check with
 # spingarn, spice and condat_vu (2026-10-13), but it is spingarn_sector's too, so the two should not share a plot.
-PINNED_SLOTS = {"condat_vu": 6, "scellier": 2, "scellier_lines": 2}
-LINE_STYLES = {"scellier": "--"}
+# The adaptive Spingarn variants (by registry order they would repeat spingarn's blue) share condat_vu's violet, split
+# dashed: it passes beside spingarn and spice (CVD Delta E 13.0) and beside spingarn_sector and spice (9.2, 2026-10-14),
+# the plots they are compared in, so adaptive matching and Condat-Vu belong in separate plots.
+PINNED_SLOTS = {"condat_vu": 6, "scellier": 2, "scellier_lines": 2, "spingarn_adaptive": 6, "spingarn_adaptive_split": 6}
+LINE_STYLES = {"scellier": "--", "spingarn_adaptive_split": "--"}
 
 
 def _color(alg, algorithms):
