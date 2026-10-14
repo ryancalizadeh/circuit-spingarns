@@ -18,7 +18,11 @@ SURFACE, INK, INK_2, MUTED, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#898781", "
 # Slots pinned away from registry order. condat_vu's would be the green, which a protanope cannot tell from spice's orange
 # (CVD Delta E 3.2, checked with the dataviz validator 2026-10-13); the violet passes all pairs beside spingarn, spice and
 # spingarn_sector.
-PINNED_SLOTS = {"condat_vu": 6}
+# The two coordinate-descent variants are one algorithm, so they share a hue and differ in line style. No free slot
+# passed beside spice's orange (amber, pink and red fail the normal-vision floor); the teal passes every check with
+# spingarn, spice and condat_vu (2026-10-13), but it is spingarn_sector's too, so the two should not share a plot.
+PINNED_SLOTS = {"condat_vu": 6, "scellier": 2, "scellier_lines": 2}
+LINE_STYLES = {"scellier": "--"}
 
 
 def _color(alg, algorithms):
@@ -90,15 +94,34 @@ def _style(ax, rows, title, ylabel, logy=True):
 
 
 def _legend(ax):
-    """Legend in one row between the title and the plot, clear of the data."""
+    """Legend in one row between the title and the plot, clear of the data. Handles are long enough to show dashes."""
     ax.legend(frameon=False, labelcolor=INK_2, loc="lower left", bbox_to_anchor=(0, 1.0),
-              ncol=max(1, len(ax.get_legend_handles_labels()[0])), borderaxespad=0.3, handlelength=1.8)
+              ncol=max(1, len(ax.get_legend_handles_labels()[0])), borderaxespad=0.3, handlelength=2.4,
+              columnspacing=1.2, fontsize=9)
+
+
+def _end_labels(ax, ends, gap_points=11):
+    """Name each series beside its last point, (name, x, y), nudging labels that end at the same x apart vertically so
+    that no two sit closer than gap_points."""
+    ax.autoscale_view()
+    to_points = 72 / ax.figure.dpi
+    for x in {x for _, x, _ in ends}:
+        group = sorted((ax.transData.transform((x, y))[1] * to_points, name) for name, gx, y in ends if gx == x)
+        placed = []
+        for y, name in group:
+            placed.append([y, name, max(y, placed[-1][2] + gap_points) if placed else y])
+        # center the nudged stack on the points it labels
+        shift = sum(y - new for y, _, new in placed) / len(placed)
+        for y, name, new in placed:
+            point = next(gy for n, gx, gy in ends if n == name and gx == x)
+            ax.annotate(name, (x, point), xytext=(8, new + shift - y), textcoords="offset points", va="center",
+                        color=INK_2, fontsize=9)
 
 
 def _plot_metric(rows, algorithms, key, title, ylabel, path, logy=True):
     fig, ax = plt.subplots(figsize=(7, 4.5), facecolor=SURFACE)
     _style(ax, rows, title, ylabel, logy)
-    drawn = 0
+    drawn, ends = 0, []
     for alg in algorithms:
         pts = [r for r in rows if r["algorithm"] == alg and r[f"{key}_mean"] is not None]
         if not pts:
@@ -108,12 +131,12 @@ def _plot_metric(rows, algorithms, key, title, ylabel, path, logy=True):
         s = np.array([r[f"{key}_std"] for r in pts])
         color = _color(alg, algorithms)
         ax.fill_between(x, np.maximum(y - s, y * 1e-3), y + s, color=color, alpha=0.15, linewidth=0)
-        ax.plot(x, y, color=color, linewidth=2, marker="o", markersize=6,
+        ax.plot(x, y, color=color, linewidth=2, linestyle=LINE_STYLES.get(alg, "-"), marker="o", markersize=6,
                 markeredgecolor=SURFACE, markeredgewidth=1.5, label=alg)
-        ax.annotate(alg, (x[-1], y[-1]), xytext=(8, 0), textcoords="offset points",
-                    va="center", color=INK_2, fontsize=9)
+        ends.append((alg, x[-1], y[-1]))
         drawn += 1
     if drawn:
+        _end_labels(ax, ends)
         _legend(ax)
     else:
         ax.text(0.5, 0.5, "no converged runs", transform=ax.transAxes, ha="center", va="center", color=MUTED)
@@ -134,7 +157,7 @@ def _plot_convergence(rows, algorithms, path):
         x = np.array([r["cells"] for r in pts])
         y = np.array([r["converged"] / r["runs"] for r in pts])
         color = _color(alg, algorithms)
-        ax.plot(x, y, color=color, linewidth=2, marker="o", markersize=6,
+        ax.plot(x, y, color=color, linewidth=2, linestyle=LINE_STYLES.get(alg, "-"), marker="o", markersize=6,
                 markeredgecolor=SURFACE, markeredgewidth=1.5, label=alg)
     if rows:
         _legend(ax)

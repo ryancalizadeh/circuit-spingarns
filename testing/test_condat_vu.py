@@ -154,12 +154,35 @@ def test_rejects_bad_options():
         except ValueError:
             continue
         assert False, f"accepted {kwargs}"
-    for device in ("1d1r", "1s1r"):
-        try:
-            CondatVuSolver().solve(Config(2, 2, seed=0, device=device))
-        except ValueError:
-            continue
-        assert False, f"solved a {device} crossbar"
+    try:
+        CondatVuSolver().solve(Config(2, 2, seed=0, device="1s1r"))
+    except ValueError:
+        pass
+    else:
+        assert False, "solved a 1s1r crossbar"
+    try:  # 1D1R cells in the tree: open cells conduct nothing, so there is no automatic balance
+        CondatVuSolver(tree="devices").solve(Config(2, 2, seed=0, device="1d1r"))
+    except ValueError:
+        pass
+    else:
+        assert False, "balanced the steps against open cells in the tree"
+
+
+def test_1d1r_matches_newton_reference():
+    """On 1D1R crossbars with signed inputs the iteration agrees with Newton, for both trees; reverse-biased cells carry
+    exactly zero current."""
+    for p, q in [(1, 1), (3, 4), (8, 8), (16, 12)]:
+        cfg = Config(p, q, seed=p * 100 + q, device="1d1r", E_range=(-1, 1.5), R_min=(1e3, 1e4), R_max=(5e4, 2e5))
+        u_ref, _ = newton(cfg)
+        v_ref = cfg.incidence().T @ u_ref
+        d = cfg.slices[BranchKind.DEVICE]
+        settings = [dict(), dict(rho=300.0)] + ([dict(tree="devices", rho=100.0, max_iterations=200_000)]
+                                                if p * q <= 12 else [])
+        for kwargs in settings:
+            out = CondatVuSolver(**kwargs).solve(cfg)
+            assert out.converged, (p, q, kwargs)
+            assert np.abs(out.v - v_ref).max() < 1e-8 * np.abs(v_ref).max(), (p, q, kwargs)
+            assert np.all(out.i[d][out.v[d] <= 0] == 0)
 
 
 def test_runs_in_the_experiment_runner():

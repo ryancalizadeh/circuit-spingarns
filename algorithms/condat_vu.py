@@ -25,7 +25,8 @@ branch: on the crossbar, in proportion to the array's side (LinesInterconnect.no
 Resolvents, elementwise. A linear branch v = emf + R_e i: (Id + tau R)^-1(x) = (x - tau emf) / (1 + tau R_e) and
 (Id + sigma G)^-1(y) = (R_e y + sigma emf) / (R_e + sigma). A memristor link: i = x - tau w, with w the root of
 tau w + g_m(w) = x (devices.tanh_root), which is the link's voltage. A memristor in the tree: the root v of
-v + sigma g_m(v) = y, Spingarn's device resolvent with port resistance sigma. In wave terms each link sees the port
+v + sigma g_m(v) = y, Spingarn's device resolvent with port resistance sigma. A 1D1R cell, i = g_m(max(v, 0)), clips
+the link's current at zero (i = 0 for x <= 0) and uses Spingarn's diode resolvent in the tree. In wave terms each link sees the port
 resistance 1 / tau and each tree branch sigma, as in Spingarn's method, but the waves are exchanged through M explicitly,
 one step late, instead of through a solve of the network.
 
@@ -176,13 +177,19 @@ def lines_norm(p, q, smallest=False):
     return float(np.sqrt(lam(p) + lam(q)))
 
 
-def link_resolvent(x, tau, R_min, R_max, w0):
+def link_resolvent(x, tau, R_min, R_max, w0, diode=False):
     """
     (Id + tau R)^-1(x) for memristor links in impedance form, R = g_m^-1, elementwise: the current i with
     i + tau g_m^-1(i) = x. With w = g_m^-1(i), the link's voltage, this is tau w + g_m(w) = x, i.e. c w + d tanh(w) = x with
     c = tau + 1 / R_max and d = 1 / R_min - 1 / R_max, solved by devices.tanh_root from the warm start w0. Returns i, w
     and the Newton steps taken.
+
+    With diode=True the links are 1D1R cells, i = g_m(max(v, 0)). In impedance form an open cell is the half-line i = 0,
+    v <= 0, so for x <= 0 the resolvent is i = 0 (w is then returned as 0, which only serves as a warm start), and for
+    x > 0 it is the memristor's.
     """
+    if diode:
+        x = np.maximum(x, 0.0)
     w, steps = tanh_root(tau + 1 / R_max, 1 / R_min - 1 / R_max, x, w0)
     return x - tau * w, w, steps
 
@@ -223,8 +230,9 @@ class CondatVuSolver(Solver):
             raise ValueError("max_iterations must be at least 1")
 
     def solve(self, cfg):
-        if cfg.device != "memristor":
-            raise ValueError(f"condat_vu handles memristor cells only, not {cfg.device!r}")
+        if cfg.device not in ("memristor", "1d1r"):
+            raise ValueError(f"condat_vu handles memristor and 1d1r cells only, not {cfg.device!r}")
+        diode = cfg.device == "1d1r"
         abstol = self.options["abstol"]
         history = {}
         t = time.perf_counter()
@@ -235,6 +243,8 @@ class CondatVuSolver(Solver):
         norm_M = net.norm()
         history["norm_time"] = time.perf_counter() - t_norm
         rho = balanced_rho(cfg, tree) if self.options["rho"] == "auto" else float(self.options["rho"])
+        if not np.isfinite(rho):  # 1D1R cells in the tree: an open cell conducts nothing, so mu_G = 0
+            raise ValueError("no automatic step balance for a tree holding 1d1r cells; give rho in ohms")
         root = np.sqrt(self.options["step_product"])
         tau, sigma = root / (rho * norm_M), rho * root / norm_M
         history.update(setup_time=time.perf_counter() - t, norm_M=norm_M, rho=rho, tau=tau, sigma=sigma,
@@ -262,7 +272,7 @@ class CondatVuSolver(Solver):
         for k in range(self.max_iterations):
             # 1) links: i <- (Id + tau R)^-1 (i - tau M^T v), where -M^T v = A_L^T u
             x = i_L + tau * net.link_voltages(u)
-            i_new[L_dev], w_L, steps = link_resolvent(x[L_dev], tau, Rn_L, Rx_L, w_L)
+            i_new[L_dev], w_L, steps = link_resolvent(x[L_dev], tau, Rn_L, Rx_L, w_L, diode)
             newton_steps += steps
             i_new[L_lin] = (x[L_lin] - tau * emf_L) / (1 + tau * R_L)
 
@@ -270,7 +280,7 @@ class CondatVuSolver(Solver):
             y = v_T + sigma * net.tree_currents(2 * i_new - i_L)
             v_new[T_lin] = (R_T * y[T_lin] + sigma * emf_T) / (R_T + sigma)
             if T_cell.size:
-                w_T, steps = device_resolvent(y[T_dev], sigma, Rn_T, Rx_T, w_T)
+                w_T, steps = device_resolvent(y[T_dev], sigma, Rn_T, Rx_T, w_T, diode=diode)
                 v_new[T_dev] = w_T
                 newton_steps += steps
 
