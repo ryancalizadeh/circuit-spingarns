@@ -17,6 +17,8 @@ Measured 2026-10-05 with ngspice-47 driven by PySpice 1.5, nominal crossbar para
 - At RELTOL 1e-3 on the desktop (2026-10-09), SPICE's KCL residuals from 64x64 up were 3-6e-10, about the same as Spingarn's at tol 1e-9, not ~1e-11.
 - Out of memory (tested with 512x512 under a 1.5 GB per-process job limit): ngspice dies during netlist loading with exit code 0xC00000FD (stack overflow), not with an error message. Runs are process-isolated since 2026-10-05, so this is recorded as status "crashed" and the sweep continues.
 
+- Diodes (2026-10-14, laptop, ngspice-47): the `D` element is SPICE3's: V_T = k T/q at 27 C (25.865 mV), gmin (1e-12 S) across each junction, and below -3 n V_T a cubic reverse law up to 0.4% of I_s off Shockley; `spice_diode_current` reproduces it to 1e-9. Behavioural `exp()` is clamped at 1e99 (arg 227.96, flat beyond); with exp diodes ngspice once declared Newton convergence at 4e71 V, which `kcl_check` passed (inf <= RELTOL*inf) until it was made to require finite residuals. With gmin and source stepping disabled the transient-op fallback fails too. See [[diode-models-findings]].
+
 User decisions (2026-10-05): runtime is the total solve time, harness overhead included, because large sizes are what matter and overhead is negligible there. SPICE stays at RELTOL 1e-3; the user will tune tolerances later.
 
 **Why:** these decide whether a SPICE failure in a sweep is a convergence failure, a memory limit or a configuration artifact, which is the core of [[project-goals]].

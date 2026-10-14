@@ -63,6 +63,9 @@ class CrossbarState:
     """
 
     def __init__(self, cfg):
+        if cfg.device not in ("memristor", "1d1r", "1s1r") or cfg.internal_node:
+            raise ValueError(f"scellier handles lumped memristor, 1d1r and 1s1r cells only, not {cfg.device!r}"
+                             + (" with internal nodes" if cfg.internal_node else ""))
         self.cfg = cfg
         p, q = cfg.p, cfg.q
         r, c = np.indices((p, q))

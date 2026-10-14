@@ -7,6 +7,19 @@ Node w{r}_{c} / b{r}_{c} is Config's word / bit node (r, c), and s{r} is the int
 its series resistance. Each memristor is a behavioral current source carrying eq. (11), with its own cell's R_min and
 R_max; a 1D1R cell applies it to max(v, 0) through ngspice's uramp. A 1S1R cell is two behavioral sources in series
 through an internal node m{r}_{c}: the selector of devices.py from w{r}_{c} to m{r}_{c}, and the memristor on to b{r}_{c}.
+
+A 1D1R crossbar with internal nodes (Config's internal_node) is netlisted the same way, with the diode from w{r}_{c} to
+m{r}_{c} written by the solver's `diode` option:
+    "D"    (Shockley diodes) ngspice's own diode element, D(IS, N, RS=0), which has junction-voltage limiting (pnjlim)
+           in its Newton iteration. It is not exactly the Shockley law (measured on ngspice-47, 2026-10-14): its thermal
+           voltage is k T / q at 27 C, 25.865 mV, so N is scaled to give N V_T = n V_T of the Config; below -3 n V_T it
+           takes SPICE3's reverse-bias approximation -I_s (1 + (3 n V_T / (e v))^3), up to 0.4% of I_s off the
+           exponential; and ngspice puts gmin (1e-12 S by default) across every junction. spice_diode_current is that law.
+    "exp"  (Shockley diodes) a behavioral source I = I_s (exp(V / (n V_T)) - 1): the exact law, without limiting. ngspice
+           clamps exp() in behavioral sources at 1e99, i.e. at an argument of ln(1e99) = 227.96, flat beyond (measured on
+           ngspice-47 2026-10-14), so it cannot overflow, but its slope vanishes there.
+    ideal diodes are regularized to I = uramp(V) / ron, an on-resistance of ron ohms: SPICE cannot represent a short.
+A lumped Shockley 1D1R cell has no closed-form law to write, so SPICE takes such circuits only with internal nodes.
 """
 import logging
 import os
@@ -18,6 +31,7 @@ from pathlib import Path
 import numpy as np
 from PySpice.Spice.NgSpice.Shared import NgSpiceCommandError, NgSpiceShared
 
+from Config import BranchKind
 from algorithms.common import Solver, SolveOutput, kcl_check
 
 # PySpice logs every ngspice stderr line that is not a "Warning:" as an error, including routine notes such as
@@ -48,15 +62,35 @@ def _ramp(x, delta):
     return f"(uramp({x}+{d})*uramp({x}+{d})-uramp({x}-{d})*uramp({x}-{d}))/{4 * float(delta)!r}"
 
 
-def netlist(cfg, options=()):
-    """SPICE netlist of the crossbar described by `cfg`, with the given `.options` entries and an `.op` analysis."""
+# ngspice's thermal voltage k T / q at its default temperature of 27 C, with the constants of its const.h (CODATA 2014)
+VT_NGSPICE = 1.38064852e-23 * 300.15 / 1.6021766208e-19
+DIODE_MODELS = ("D", "exp")
+
+
+def spice_diode_current(v, I_s, c, gmin):
+    """
+    The law of ngspice's diode element with IS = I_s, N V_T = c and RS = 0, as measured on ngspice-47 (2026-10-14; it is
+    SPICE3's dioload.c): I_s (e^{v / c} - 1) for v >= -3 c, -I_s (1 + (3 c / (e v))^3) below, plus gmin v.
+    """
+    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+        return np.where(v >= -3 * c, I_s * np.expm1(v / c), -I_s * (1 + (3 * c / (np.e * v)) ** 3)) + gmin * v
+
+
+def netlist(cfg, options=(), diode="D", ron=1e-3):
+    """SPICE netlist of the crossbar described by `cfg`, with the given `.options` entries and an `.op` analysis. diode
+    and ron choose how diodes on branches of their own are written (see the module docstring)."""
+    if cfg.device == "1d1r_shockley" and not cfg.internal_node:
+        raise ValueError("SPICE cannot express the lumped Shockley 1D1R law; use internal_node=True")
+    if diode not in DIODE_MODELS:
+        raise ValueError(f"diode must be one of {DIODE_MODELS}, not {diode!r}")
     p, q = cfg.p, cfg.q
     g_lin = (1 / cfg.R_max_cell).reshape(p, q)
     g_tanh = (1 / cfg.R_min_cell - 1 / cfg.R_max_cell).reshape(p, q)
-    # the memristor's voltage: across the cell, beyond the selector in a 1S1R cell, through ngspice's uramp in a 1D1R
-    x = {"memristor": "V(w{r}_{c},b{r}_{c})", "1d1r": "uramp(V(w{r}_{c},b{r}_{c}))",
-         "1s1r": "V(m{r}_{c},b{r}_{c})"}[cfg.device]
-    tail = "m" if cfg.device == "1s1r" else "w"  # the memristor's word-side node
+    tail = "m" if cfg.device == "1s1r" or cfg.internal_node else "w"  # the memristor's word-side node
+    # the memristor's voltage: from its word-side node, through ngspice's uramp in a lumped 1D1R cell
+    x = f"V({tail}{{r}}_{{c}},b{{r}}_{{c}})"
+    if cfg.device_law == "1d1r":
+        x = f"uramp({x})"
     R_wire, R_source, R_load = repr(float(cfg.R_wire)), repr(float(cfg.R_source)), repr(float(cfg.R_load))
     lines = [f".title crossbar {p}x{q} seed={cfg.seed}"]
     lines += [f"V{r} s{r} 0 {float(cfg.E[r])!r}" for r in range(p)]
@@ -71,6 +105,16 @@ def netlist(cfg, options=()):
         selector = (f"I={1 / float(cfg.R_off)!r}*{vs}+{1 / float(cfg.R_on) - 1 / float(cfg.R_off)!r}*"
                     f"({_ramp(f'{vs}-{V_th}', cfg.delta)}-{_ramp(f'-{vs}-{V_th}', cfg.delta)})")
         lines += [f"BS{r}_{c} w{r}_{c} m{r}_{c} " + selector.format(r=r, c=c) for r in range(p) for c in range(q)]
+    if cfg.diode_law == "shockley" and diode == "D":
+        lines.append(f".model dshockley D(IS={float(cfg.I_s)!r} N={cfg.n * cfg.V_T / VT_NGSPICE!r} RS=0)")
+        lines += [f"D{r}_{c} w{r}_{c} m{r}_{c} dshockley" for r in range(p) for c in range(q)]
+    elif cfg.diode_law == "shockley":
+        I_s, c_ = repr(float(cfg.I_s)), repr(float(cfg.n * cfg.V_T))
+        lines += [f"BD{r}_{c} w{r}_{c} m{r}_{c} I={I_s}*(exp(V(w{r}_{c},m{r}_{c})/{c_})-1)"
+                  for r in range(p) for c in range(q)]
+    elif cfg.diode_law == "ideal":
+        g_on = repr(1 / float(ron))
+        lines += [f"BD{r}_{c} w{r}_{c} m{r}_{c} I={g_on}*uramp(V(w{r}_{c},m{r}_{c}))" for r in range(p) for c in range(q)]
     lines += [f"RL{c} b{p - 1}_{c} 0 {R_load}" for c in range(q)]
     if options:
         lines.append(".options " + " ".join(options))
@@ -79,9 +123,35 @@ def netlist(cfg, options=()):
 
 
 def node_names(cfg):
-    """SPICE names of Config's nodes, in Config's node order: word nodes, then bit nodes, each row-major."""
+    """SPICE names of Config's nodes, in Config's node order: word nodes, then bit nodes, then any internal nodes, each
+    row-major."""
     p, q = cfg.p, cfg.q
-    return [f"w{r}_{c}" for r in range(p) for c in range(q)] + [f"b{r}_{c}" for r in range(p) for c in range(q)]
+    names = [f"w{r}_{c}" for r in range(p) for c in range(q)] + [f"b{r}_{c}" for r in range(p) for c in range(q)]
+    if cfg.internal_node:
+        names += [f"m{r}_{c}" for r in range(p) for c in range(q)]
+    return names
+
+
+def as_solved_current(cfg, diode, ron, gmin):
+    """
+    The branch laws of the circuit ngspice actually solves, as a current(v, x0) function for kcl_check, or None where
+    they are Config's own: its diode element's law (spice_diode_current) for diode="D", and the on-resistance ron for
+    ideal diodes, both on branches of their own. The behavioral exp is the exact Shockley law.
+    """
+    if cfg.diode_law is None or cfg.diode_law == "shockley" and diode == "exp":
+        return None
+    d, e = cfg.slices[BranchKind.DEVICE], cfg.slices[BranchKind.DIODE]
+
+    def current(v, x0=None):
+        i = cfg.current(v, x0)
+        if cfg.diode_law == "ideal":
+            i[d] = cfg.device_current(v[d])
+            i[e] = np.maximum(v[e], 0.0) / ron
+        else:
+            i[e] = spice_diode_current(v[e], cfg.I_s, cfg.n * cfg.V_T, gmin)
+        return i
+
+    return current
 
 
 # ngspice's notes when a fallback for the operating point succeeds; plain Newton prints none. When every fallback fails,
@@ -156,20 +226,32 @@ class SpiceSolver(Solver):
     gmin stepping, source stepping and finally a transient ramp (so total iterations can exceed it). Both default to
     SPICE's standard values; ngspice raises any ITL1 below 100 to 100. matrix_solver selects KLU (default) or
     ngspice's older SPARSE 1.3, whose ordering
-    becomes the bottleneck beyond ~64x64. Any other keyword is passed to ngspice as an option, e.g. abstol=1e-15 or
-    gminsteps=0 (True for a bare flag).
+    becomes the bottleneck beyond ~64x64. diode ("D" or "exp") and ron write diodes on branches of their own (see the
+    module docstring); they do not matter otherwise. Any other keyword is passed to ngspice as an option, e.g.
+    abstol=1e-15 or gminsteps=0 (True for a bare flag).
 
     A run counts as converged only if ngspice produces an operating point and that point satisfies KCL to ngspice's
     own tolerance (see kcl_check): the transient-ramp fallback reports success even for circuits with no DC solution.
+    The test uses the laws ngspice was given (as_solved_current); where those differ from Config's (the diode element,
+    the regularized ideal diode), the residual under Config's exact laws is recorded too, as kcl_exact_residual and
+    kcl_exact_residual_rel.
     """
     name = "spice"
     default_tol = 1e-3
     default_max_iterations = 100
 
-    def __init__(self, tol=None, max_iterations=None, matrix_solver="klu", **options):
+    default_diode = "D"
+    SOLVER_OPTIONS = ("matrix_solver", "diode", "ron")  # the options that are not ngspice's
+
+    def __init__(self, tol=None, max_iterations=None, matrix_solver="klu", diode=None, ron=1e-3, **options):
+        diode = self.default_diode if diode is None else diode
         if matrix_solver not in ("klu", "sparse"):
             raise ValueError(f"matrix_solver must be 'klu' or 'sparse', not {matrix_solver!r}")
-        super().__init__(tol, max_iterations, matrix_solver=matrix_solver, **options)
+        if diode not in DIODE_MODELS:
+            raise ValueError(f"diode must be one of {DIODE_MODELS}, not {diode!r}")
+        if not (isinstance(ron, (int, float)) and not isinstance(ron, bool) and ron > 0):
+            raise ValueError(f"ron must be a positive resistance, not {ron!r}")
+        super().__init__(tol, max_iterations, matrix_solver=matrix_solver, diode=diode, ron=ron, **options)
         ngspice()  # load and initialize the shared library here, outside the timed solve calls
 
     def describe(self):
@@ -177,7 +259,7 @@ class SpiceSolver(Solver):
                     itl1_effective=max(100, self.max_iterations), **self.options)
 
     def spice_options(self):
-        extra = {k: v for k, v in self.options.items() if k != "matrix_solver"}
+        extra = {k: v for k, v in self.options.items() if k not in self.SOLVER_OPTIONS}
         return [f"reltol={float(self.tol)!r}", f"itl1={int(self.max_iterations)}", self.options["matrix_solver"]] + [
             k if v is True else f"{k}={v}" for k, v in extra.items()]
 
@@ -186,7 +268,7 @@ class SpiceSolver(Solver):
         history = {}
         raw = Path(tempfile.gettempdir()) / f"crossbar_op_{os.getpid()}.raw"
         t = time.perf_counter()
-        text = netlist(cfg, self.spice_options())
+        text = netlist(cfg, self.spice_options(), self.options["diode"], self.options["ron"])
         history["netlist_time"] = time.perf_counter() - t
         before = set(ng.plot_names)
         try:
@@ -222,7 +304,13 @@ class SpiceSolver(Solver):
 
             t = time.perf_counter()
             abstol = float(self.options.get("abstol", 1e-12))
-            v, i, ok, history["kcl_residual"], history["kcl_residual_rel"] = kcl_check(cfg, u, self.tol, abstol)
+            current = as_solved_current(cfg, self.options["diode"], self.options["ron"],
+                                        float(self.options.get("gmin", 1e-12)))
+            v, i, ok, history["kcl_residual"], history["kcl_residual_rel"] = kcl_check(cfg, u, self.tol, abstol,
+                                                                                       current=current)
+            if current is not None:
+                _, _, _, history["kcl_exact_residual"], history["kcl_exact_residual_rel"] = kcl_check(cfg, u, self.tol,
+                                                                                                    abstol)
             history["verify_time"] = time.perf_counter() - t
             return SolveOutput(v, i, ok, iterations, history)
         finally:
@@ -232,3 +320,9 @@ class SpiceSolver(Solver):
                 except NgSpiceCommandError:
                     pass
             raw.unlink(missing_ok=True)
+
+
+class SpiceExpSolver(SpiceSolver):
+    """SpiceSolver writing Shockley diodes as behavioral exp() sources, without the diode element's limiting."""
+    name = "spice_exp"
+    default_diode = "exp"

@@ -17,6 +17,8 @@ Measured 2026-10-09 on the PC (see [[measurement-machine]]) with `diode_experime
 - Accuracy is NOT matched on 1D1R. On nodes carrying > 1 nA, SPICE's KCL rel residual is 2e-11 to 1e-9 vs Spingarn's 3e-9 to 3e-6, so the runtime gap understates SPICE's lead. The recorded kcl_residual_rel (~0.6-0.97 for spingarn) is an artifact: 27-36% of nodes sit on dead lines (all cells off, < 1 nA), where residual / max(scale, abstol) ~ 1 at a 1e-12 A residual.
 - Spingarn 256 per-iteration time varied 30 vs 48 ms between seeds in one sweep (same iterations, same factor time); cause unknown.
 
+Update 2026-10-14 (laptop): plain undamped Newton on our own CHOLMOD (in-repo `newton`) 2-cycles at this circuit's kink from 64x64 (SPICE's Newton does not); with step halving it takes 9-12 its and ties adaptive Spingarn. The same circuit with the ideal diode on its own branch (internal node) solves exactly in Spingarn: adaptive 22-27 its flat, fixed (diode port R_min) as slow as lumped. Shockley diodes instead of ideal: see [[diode-models-findings]].
+
 **Why:** these decide how 1D1R results can be claimed. Without adaptive matching, Spingarn on 1D1R is not size-independent, and the default circuit does not exercise the device nonlinearity at scale.
 
 **How to apply:** use alpha < 1 for leakless 1D1R (fixed or adaptive matching; adaptive's default is 2/3). Quote iteration counts together with the matching rule. Don't claim tanh nonlinearity at >= 64x64 for this circuit. Check `operating_point` diagnostics whenever circuit parameters change. See [[spingarn-solver-findings]] for the memristor-only baseline (size-independent, 5 iterations).

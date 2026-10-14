@@ -13,7 +13,8 @@ from algorithms import SOLVERS
 from algorithms.ordering import nested_dissection
 from algorithms.spingarns import (SpingarnAdaptiveSolver, SpingarnAdaptiveSplitSolver, SpingarnCholmodSolver,
                                   SpingarnSectorSolver, SpingarnSLUSolver, SpingarnSolver, blas_threads,
-                                  device_resolvent, factorize, port_resistances)
+                                  device_resolvent, diode_port_resistances, diode_resolvent, factorize,
+                                  port_resistances)
 from run_experiments import run_sweep
 from test_config import solve as newton
 
@@ -387,12 +388,122 @@ def test_runs_in_the_experiment_runner():
         assert all(r["peak_memory"] > 0 for r in records)
         spec = json.load(open(Path(tmp) / "experiment.json"))
         assert spec["solvers"] == [dict(name=name, tol=1e-9, max_iterations=10_000, gamma=gamma, alpha=1.0, abstol=1e-12,
-                                        factorization=factorization, ordering=ordering, blas_threads=1)
+                                        factorization=factorization, ordering=ordering, blas_threads=1,
+                                        diode_gamma="r_min")
                                    for name, gamma, factorization, ordering in [
                                        ("spingarn", "r_lo", "cholmod", "nested_dissection"),
                                        ("spingarn_sector", "geometric", "cholmod", "nested_dissection"),
                                        ("spingarn_slu", "r_lo", "slu", "builtin")]]
         assert (Path(tmp) / "memory.png").stat().st_size > 0
+
+
+SHOCKLEY = dict(DIODE, device="1d1r_shockley")
+
+
+def test_shockley_resolvent():
+    """x + gamma I_s (e^{x / c} - 1) = a to rounding, for |a| from 1e-300 to 1e5 V (adaptive matching puts a at ~1e5 V
+    behind gamma = 1e8 ohm), gamma from 1e-6 to 1e10 ohm and I_s from 1e-14 to 1e-3 A, without overflow; |x| <= |a| and x
+    has a's sign. Checked against the law written with exp."""
+    from devices import shockley_resolvent
+    rng = np.random.default_rng(3)
+    a = np.concatenate([np.sign(rng.normal(size=6000)) * 10 ** rng.uniform(-300, 5, 6000),
+                        np.linspace(-0.03, 0.03, 2001), [0.0, 1e5, -1e5]])
+    c = 0.02585
+    with np.errstate(over="raise", invalid="raise"):
+        for I_s in (1e-14, 1e-9, 1e-6, 1e-3):
+            for gamma in (1e-6, 1.0, 1e3, 1e5, 1e8, 1e10):
+                x = shockley_resolvent(a, gamma, I_s, c)
+                i = I_s * (np.exp(x / c) - 1)
+                residual = np.abs(x + gamma * I_s * np.expm1(x / c) - a)
+                assert np.all(residual <= 1e-13 * (np.abs(x) + gamma * np.abs(i) + np.abs(a))), (I_s, gamma)
+                assert np.all(np.abs(x) <= np.abs(a)) and np.all(np.sign(x) == np.sign(a)), (I_s, gamma)
+                assert np.allclose(gamma * i, a - x, rtol=1e-10, atol=1e-13 * np.abs(a).max())
+
+
+def test_diode_series_resolvent():
+    """devices.diode_series_solve solves x_d + x_m + gamma i = a with i = I_s (e^{x_d / c} - 1) = g_m(x_m), from deep
+    reverse to deep forward bias, gamma from 0 (the cell law) to 1e8 ohm, cold or warm-started from anywhere."""
+    from devices import diode_series_solve, memristor_current
+    rng = np.random.default_rng(2)
+    n = 3000
+    a = np.concatenate([np.sign(rng.normal(size=n - 4)) * 10 ** rng.uniform(-12, 5, n - 4), [0.0, 1e5, -1e5, 1e-300]])
+    R_min, R_max = np.exp(rng.uniform(np.log(1e3), np.log(1e4), n)), np.exp(rng.uniform(np.log(5e4), np.log(2e5), n))
+    c = 0.02585
+    with np.errstate(over="raise"):
+        for I_s in (1e-14, 1e-9, 1e-6):
+            for gamma in (0.0, 1.0, 1e3, 1e8):
+                for x0 in (None, (rng.normal(size=n), rng.normal(size=n))):
+                    v, i, x_d, x_m, steps = diode_series_solve(a, gamma, R_min, R_max, I_s, c, x0)
+                    scale = np.abs(x_d) + np.abs(x_m) + gamma * np.abs(i) + np.abs(a)
+                    assert np.all(np.abs(v + gamma * i - a) <= 2e-13 * scale), (I_s, gamma)
+                    # exp(x) - 1 is accurate to ~eps absolute near 0, hence atol ~ eps I_s
+                    assert np.allclose(I_s * (np.exp(x_d / c) - 1), i, rtol=1e-12, atol=1e-15 * I_s)
+                    assert np.allclose(memristor_current(x_m, R_min, R_max), i, rtol=1e-12, atol=1e-25)
+                    assert np.array_equal(v, x_d + x_m) and np.all(np.sign(i) == np.sign(a)) and steps <= 60
+
+
+def test_diode_resolvent_and_port_resistances():
+    """An ideal diode's resolvent is min(a, 0): open for a <= 0, a short carrying a / gamma otherwise. Diode port
+    resistances follow their own rule, never 0: the cell's R_min, the Shockley zero-bias resistance n V_T / I_s, or a
+    number; zero-bias matching of an ideal diode is refused, as are bad rules."""
+    ideal = Config(3, 4, seed=0, internal_node=True, **DIODE)
+    shockley = Config(3, 4, seed=0, internal_node=True, I_s=1e-9, n=1.5, **SHOCKLEY)
+    a = np.random.default_rng(0).normal(size=12)
+    assert np.array_equal(diode_resolvent(ideal, a, 1e3), np.minimum(a, 0.0))
+    e = ideal.slices[BranchKind.DIODE]
+    for cfg in (ideal, shockley):
+        assert np.array_equal(port_resistances(cfg, "r_lo")[e], cfg.R_min_cell)
+        assert np.all(port_resistances(cfg, "r_lo", 30.0)[e] == 30.0)
+        assert np.array_equal(port_resistances(cfg, "r_lo")[cfg.slices[BranchKind.DEVICE]], cfg.R_min_cell)
+    assert np.allclose(diode_port_resistances(shockley, "zero_bias"), 1.5 * 0.02585 / 1e-9)
+    try:
+        diode_port_resistances(ideal, "zero_bias")
+        assert False, "zero-bias matching of an ideal diode accepted"
+    except ValueError:
+        pass
+    for bad in ("median", 0.0, -1.0, True):
+        try:
+            SpingarnSolver(diode_gamma=bad)
+        except ValueError:
+            continue
+        assert False, f"accepted diode_gamma={bad!r}"
+
+
+def test_diode_models_match_lumped_newton():
+    """On the three diode models (lumped Shockley cell, Shockley diode and ideal diode on branches of their own) fixed and
+    adaptive Spingarn agree at the word and bit nodes with Newton on the lumped cell, the same physical circuit; each
+    run's branch laws hold, adaptive matching opens only ideal diodes that end up reverse-biased, and the a priori bound is
+    1. The split variant is left out: it stalls where an unopened branch reflects strongly, as a conducting ideal diode
+    does (-1 against any port resistance), and crawls on lumped Shockley cells with I_s = 1e-6 A at 16x32."""
+    for p, q in [(1, 1), (3, 4), (8, 8), (16, 32)]:
+        for I_s in (1e-14, 1e-6):
+            for lumped, internal in [(dict(SHOCKLEY, I_s=I_s), dict(SHOCKLEY, I_s=I_s, internal_node=True)),
+                                     (DIODE, dict(DIODE, internal_node=True))]:
+                ref_cfg = Config(p, q, seed=p * 100 + q, **lumped)
+                u_ref, _ = newton(ref_cfg)
+                u_ref = u_ref[:2 * p * q]
+                scale = np.abs(u_ref).max()
+                for circuit in ([lumped] if lumped is DIODE else [lumped, internal]) + [internal] * (lumped is DIODE):
+                    cfg = Config(p, q, seed=p * 100 + q, **circuit)
+                    for solver in [SpingarnSolver(alpha=0.8, max_iterations=5000), SpingarnAdaptiveSolver()]:
+                        out = solver.solve(cfg)
+                        key = (p, q, I_s, cfg.device, cfg.internal_node, solver.name)
+                        assert out.converged, key
+                        assert np.abs(cfg.line_potentials(out.v) - u_ref).max() < 1e-7 * scale, key
+                        if cfg.diode_law == "ideal":  # on the diode's graph exactly, the memristor on its law
+                            e, d = cfg.slices[BranchKind.DIODE], cfg.slices[BranchKind.DEVICE]
+                            assert np.all(out.v[e] <= 0) and np.all(out.i[e] >= 0) and not np.any(out.v[e] * out.i[e])
+                            assert np.allclose(out.i[d], cfg.device_current(out.v[d]), rtol=1e-12, atol=1e-18), key
+                        else:
+                            assert np.allclose(out.i, cfg.current(out.v), rtol=1e-9, atol=1e-13), key
+                        assert out.history["contraction_bound"] == 1.0
+                        # an ideal diode is open only in reverse; a Shockley diode also deep in subthreshold, where
+                        # its incremental resistance passes open_resistance (1e9 ohm at 0.2 V for I_s = 1e-14 A)
+                        if "open_cells" in out.history and cfg.device == "1d1r":
+                            e = cfg.slices[BranchKind.DIODE if cfg.internal_node else BranchKind.DEVICE]
+                            assert out.history["open_cells"] <= np.sum(out.v[e] < 1e-9), key
+                if lumped is DIODE:
+                    break
 
 
 if __name__ == "__main__":

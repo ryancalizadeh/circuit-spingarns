@@ -95,7 +95,8 @@ def test_counts_kinds_and_incidence():
     for p, q in [(1, 1), (1, 5), (4, 1), (3, 4), (7, 2)]:
         cfg = Config(p, q, seed=0)
         sizes = {k: cfg.slices[k].stop - cfg.slices[k].start for k in K}
-        expect = {K.WORD_WIRE: p * (q - 1), K.BIT_WIRE: q * (p - 1), K.DEVICE: p * q, K.SOURCE: p, K.LOAD: q}
+        expect = {K.WORD_WIRE: p * (q - 1), K.BIT_WIRE: q * (p - 1), K.DEVICE: p * q, K.SOURCE: p, K.LOAD: q,
+                  K.DIODE: 0}
         assert sizes == expect, (p, q, sizes)
         assert cfg.num_nodes == 2 * p * q and cfg.num_branches == 3 * p * q == len(cfg.kind)
         for k in K:
@@ -290,6 +291,131 @@ def test_1s1r_solution_satisfies_prose_kcl():
                 _, _, v_s, _, _ = cfg.series_solve(v[cfg.slices[K.DEVICE]])
                 on = np.abs(v_s) > cfg.V_th
                 assert 0 < np.mean(on) < 1, (p, q, delta)
+
+
+SHOCKLEY = dict(device="1d1r_shockley", E_range=(-1, 1.5), **RANDOM_CELLS)
+
+
+def shockley_law(cfg, v):
+    """The Shockley diode written out with exp, independently of devices.py."""
+    return cfg.I_s * (np.exp(v / (cfg.n * cfg.V_T)) - 1)
+
+
+def lumped_shockley_bisect(cfg, v):
+    """Lumped Shockley 1D1R cell currents at cell voltages v by nested bisection: the diode voltage x solves
+    x + g_m^-1(shockley(x)) = v, increasing in x and between min(v, 0) and max(v, 0)."""
+    g_m = lambda x: x / cfg.R_max_cell + (1 / cfg.R_min_cell - 1 / cfg.R_max_cell) * np.tanh(x)
+
+    def bisect(f, lo, hi):
+        for _ in range(200):
+            mid = (lo + hi) / 2
+            below = f(mid) < 0
+            lo, hi = np.where(below, mid, lo), np.where(below, hi, mid)
+        return (lo + hi) / 2
+
+    def g_m_inv(i):
+        bound = cfg.R_max_cell * np.abs(i)
+        return bisect(lambda x: g_m(x) - i, -bound, bound)
+
+    x = bisect(lambda x: x + g_m_inv(shockley_law(cfg, x)) - v, np.minimum(v, 0), np.maximum(v, 0))
+    return shockley_law(cfg, x)
+
+
+def test_lumped_shockley_cell_law_and_sector():
+    """A lumped Shockley 1D1R cell carries the series law (checked against nested bisection, from deep reverse to deep
+    forward bias, for silicon- and Schottky-like saturation currents); its conductance is the series combination, matches
+    finite differences and lies in [0, 1 / R_min]; params() round-trips I_s, n and V_T."""
+    for I_s, n in [(1e-14, 1.0), (1e-9, 1.2), (1e-6, 1.5)]:
+        cfg = Config(4, 5, seed=3, I_s=I_s, n=n, **SHOCKLEY)
+        d = cfg.slices[K.DEVICE]
+        assert np.array_equal(cfg.r_lo[d], cfg.R_min_cell) and np.all(np.isinf(cfg.r_hi[d]))
+        rng = np.random.default_rng(1)
+        for scale in (0.05, 0.5, 2.0):
+            v = rng.normal(scale=scale, size=cfg.p * cfg.q)
+            i = cfg.device_current(v)
+            assert np.allclose(i, lumped_shockley_bisect(cfg, v), rtol=1e-9, atol=1e-20), (I_s, scale)
+            v_cell, i2, v_d, v_m, _ = cfg.diode_series_solve(v)
+            assert np.allclose(v_cell, v, rtol=1e-12, atol=1e-15) and np.array_equal(i, i2)
+            g = cfg.device_conductance(v)
+            assert np.all(g >= 0) and np.all(g <= 1 / cfg.R_min_cell * (1 + 1e-12))
+            h = 1e-7
+            fd = (cfg.device_current(v + h) - cfg.device_current(v - h)) / (2 * h)
+            assert np.allclose(fd, g, rtol=1e-5, atol=1e-14)
+        params = cfg.params()
+        assert (params["I_s"], params["n"], params["V_T"]) == (I_s, n, 0.02585)
+        assert np.array_equal(Config(**params).device_current(v), i)
+    for bad in [dict(I_s=0.0), dict(n=-1.0), dict(V_T=0.0)]:
+        try:
+            Config(2, 2, seed=0, **{**SHOCKLEY, **bad})
+        except ValueError:
+            continue
+        assert False, f"accepted {bad}"
+
+
+def test_internal_node_topology():
+    """With internal_node a cell's diode runs from its word node to a new internal node and its memristor on to the bit
+    node: 3pq nodes and 4pq branches, the diodes in a DIODE block after the others, every internal node touching exactly
+    its cell's diode and memristor; the incidence keeps full rank. Other devices refuse internal nodes."""
+    for device in ("1d1r", "1d1r_shockley"):
+        for p, q in [(1, 1), (1, 5), (4, 1), (3, 4)]:
+            cfg = Config(p, q, seed=0, device=device, internal_node=True)
+            pq = p * q
+            sizes = {k: cfg.slices[k].stop - cfg.slices[k].start for k in K}
+            assert sizes == {K.WORD_WIRE: p * (q - 1), K.BIT_WIRE: q * (p - 1), K.DEVICE: pq, K.SOURCE: p, K.LOAD: q,
+                             K.DIODE: pq}
+            assert cfg.num_nodes == 3 * pq and cfg.num_branches == 4 * pq == len(cfg.kind)
+            r, c = np.indices((p, q))
+            d, e = cfg.slices[K.DEVICE], cfg.slices[K.DIODE]
+            assert np.array_equal(cfg.tail[e], cfg.word_node(r, c).ravel())
+            assert np.array_equal(cfg.head[e], cfg.mid_node(r, c).ravel())
+            assert np.array_equal(cfg.tail[d], cfg.mid_node(r, c).ravel())
+            assert np.array_equal(cfg.head[d], cfg.bit_node(r, c).ravel())
+            A = cfg.incidence()
+            degree = np.asarray(abs(A).sum(axis=1)).ravel()
+            assert np.all(degree[2 * pq:] == 2)
+            assert np.linalg.matrix_rank(A.toarray()) == cfg.num_nodes
+            assert np.all(cfg.r_lo[e] == 0) and np.all(np.isinf(cfg.r_hi[e]))
+            assert np.array_equal(cfg.r_lo[d], cfg.R_min_cell) and np.array_equal(cfg.r_hi[d], cfg.R_max_cell)
+            assert Config(**cfg.params()).internal_node
+    for device in ("memristor", "1s1r"):
+        try:
+            Config(2, 2, seed=0, device=device, internal_node=True)
+        except ValueError:
+            continue
+        assert False, f"accepted internal nodes for {device}"
+
+
+def test_internal_node_laws():
+    """Internal-node Shockley circuits: the diode branch carries the Shockley law and the memristor branch the memristor's,
+    with matching conductances. Ideal diodes on their own branch: both branches of a cell carry the lumped cell's current
+    of the cell's total voltage, and conductance() refuses."""
+    cfg = Config(3, 4, seed=1, I_s=1e-9, internal_node=True, **SHOCKLEY)
+    mem = Config(3, 4, seed=1, **RANDOM_CELLS)
+    d, e = cfg.slices[K.DEVICE], cfg.slices[K.DIODE]
+    v = np.random.default_rng(0).normal(scale=0.3, size=cfg.num_branches)
+    i, g = cfg.current(v), cfg.conductance(v)
+    assert np.allclose(i[e], shockley_law(cfg, v[e]), rtol=1e-12, atol=1e-25)
+    assert np.array_equal(i[d], mem.device_current(v[d])) and np.array_equal(g[d], mem.device_conductance(v[d]))
+    assert np.allclose(g[e], cfg.I_s / (cfg.n * cfg.V_T) * np.exp(v[e] / (cfg.n * cfg.V_T)), rtol=1e-12)
+    ideal = Config(3, 4, seed=1, device="1d1r", internal_node=True, **RANDOM_CELLS)
+    lumped = Config(3, 4, seed=1, device="1d1r", **RANDOM_CELLS)
+    i = ideal.current(v)
+    assert np.array_equal(i[d], i[e]) and np.array_equal(i[d], lumped.device_current(v[d] + v[e]))
+    try:
+        ideal.conductance(v)
+    except ValueError:
+        return
+    assert False, "an ideal diode on its own branch reported a conductance"
+
+
+def test_line_potentials():
+    """Word and bit potentials read off the lines are the node potentials whenever v satisfies KVL, whatever the shape
+    and formulation."""
+    for kwargs in [dict(), SHOCKLEY, dict(SHOCKLEY, internal_node=True, I_s=1e-6)]:
+        for p, q in [(1, 1), (1, 6), (5, 1), (3, 4)]:
+            cfg = Config(p, q, seed=2, **kwargs)
+            u = np.random.default_rng(p + q).normal(size=cfg.num_nodes)
+            assert np.allclose(cfg.line_potentials(cfg.incidence().T @ u), u[:2 * p * q], rtol=0, atol=1e-13)
 
 
 if __name__ == "__main__":

@@ -9,11 +9,17 @@ conductances) and the Spingarn solver (the cells' resolvents).
                |x| < delta, so delta sets only the sharpness of the knee, and delta = 0 is the piecewise-linear selector
                with a kink at |v| = V_th.
 
+    Shockley   i = g_d(v) = I_s (e^{v / c} - 1) with c = n V_T, a pn or Schottky diode: incremental resistance
+               c / (i + I_s), from ~0 in deep forward bias to infinity in deep reverse bias, so its sector is [0, inf).
+
 A 1S1R cell is a selector in series with a memristor: at cell voltage v = x_s + x_m it carries i = g_s(x_s) = g_m(x_m),
 and its incremental resistance, the sum of the two, lies in [R_on + R_min, R_off + R_max]. Its law has no closed form;
-series_solve computes it.
+series_solve computes it. A lumped Shockley 1D1R cell is a Shockley diode in series with a memristor, i = g_d(x_d) =
+g_m(x_m) at v = x_d + x_m, with incremental resistance in [R_min, inf); diode_series_solve computes it. A Shockley diode
+alone has a closed-form resolvent, shockley_resolvent.
 """
 import numpy as np
+from scipy.special import wrightomega
 
 
 def memristor_current(v, R_min, R_max):
@@ -129,3 +135,98 @@ def series_solve(a, gamma, R_min, R_max, R_on, R_off, V_th, delta, x0=None):
         f, df, i_k, x_k, done = evaluate(k, t_k, x_k)
         done |= np.abs(dx) <= 1e-15 * t_k
     raise RuntimeError("series_solve: did not converge")
+
+
+def shockley_current(v, I_s, c):
+    """The Shockley diode, i = I_s (e^{v / c} - 1) with c = n V_T; expm1 keeps it accurate near v = 0."""
+    return I_s * np.expm1(v / c)
+
+
+def shockley_conductance(v, I_s, c):
+    """Incremental conductance I_s e^{v / c} / c: 0 in deep reverse bias (underflow), unbounded in forward bias."""
+    return I_s / c * np.exp(v / c)
+
+
+def shockley_resolvent(a, gamma, I_s, c):
+    """
+    A Shockley diode behind a port resistance gamma > 0, elementwise: the root x of x + gamma I_s (e^{x / c} - 1) = a.
+
+    With s = gamma I_s, the substitution x = a + s - c w turns the equation into w + ln w = L, L = (a + s) / c + ln(s / c),
+    whose root is the Wright omega function w = omega(L). omega(L) ~ L - ln L for large L and ~ e^L for very negative L,
+    and scipy evaluates it without overflow for any L, so the formula holds for any a and gamma, e.g. a = 1e5 V at gamma =
+    1e8 ohm, and |x| <= |a|. But x is the difference of a + s and c omega, which cancels whenever |x| is small against
+    them: relative residuals up to ~1e-3 measured, and 100% for a ~ 0. So for |a| < c the start is instead the
+    linearization a / (1 + s / c), which lies at or right of the root (expm1(y) >= y), from where Newton's method on the
+    convex left side descends monotonically. Four Newton steps from either start reach rounding: relative residual
+    <= 1.1e-14 measured for |a| in [1e-300, 1e5] V, gamma in [1e-6, 1e10] ohm and I_s in [1e-14, 1e-3] A. The steps
+    cannot overflow: e^{x / c} = 1 + (a - x) / s is finite near the root, and the omega start lies within rounding of it.
+    """
+    s = gamma * I_s
+    with np.errstate(over="ignore", invalid="ignore"):  # the branch np.where discards may overflow
+        x = np.where(np.abs(a) < c, a / (1 + s / c), a + s - c * wrightomega((a + s) / c + np.log(s / c)))
+    for _ in range(4):
+        x = x - (x + s * np.expm1(x / c) - a) / (1 + s / c * np.exp(x / c))
+    return x
+
+
+def diode_series_solve(a, gamma, R_min, R_max, I_s, c, x0=None):
+    """
+    A lumped Shockley 1D1R cell (a Shockley diode in series with a memristor) behind a port resistance gamma >= 0,
+    elementwise: the diode voltage x_d, memristor voltage x_m and current i with i = I_s (e^{x_d / c} - 1) = g_m(x_m) and
+    x_d + x_m + gamma i = a. gamma = 0 gives the cell's law at cell voltage a, gamma > 0 its resolvent J_{gamma T}(a).
+    x0 = (x_d, x_m) is an optional warm start. Returns the cell voltage v = x_d + x_m, i, x_d, x_m and the outer steps.
+
+    The diode is not odd, so the unknown is the signed diode voltage t = x_d. H(t) = t + g_m^-1(i(t)) + gamma i(t) is
+    increasing with slope 1 + g_d'(t) (1 / g_m'(x_m) + gamma), and H(t) = a has its root in
+        a >= 0:  [0, min(a, c log1p(a / ((R_min + gamma) I_s)))], since g_m^-1(i) >= R_min i for i >= 0, so the current
+                 is at most a / (R_min + gamma);
+        a < 0:   [a, min(0, a + (R_max + gamma) I_s)], since i > -I_s and |g_m^-1(i)| <= R_max |i|.
+    The forward bound keeps e^{t / c} finite however large a is (gamma up to 1e8 ohm puts a at ~1e5 V under adaptive
+    matching). The solve is series_solve's: safeguarded Newton (rtsafe) from the bracket's upper end (H is convex in
+    forward bias, so Newton descends monotonically from there) or the warm start, g_m^-1 by tanh_root, and cells retire
+    as they converge.
+    """
+    a = np.asarray(a, dtype=float)
+    gamma, R_min, R_max = (np.broadcast_to(np.asarray(x, dtype=float), a.shape) for x in (gamma, R_min, R_max))
+    fwd = a >= 0
+    with np.errstate(divide="ignore"):  # gamma = 0 and R_min > 0: never 0 / 0
+        lo = np.where(fwd, 0.0, a)
+        hi = np.where(fwd, np.minimum(a, c * np.log1p(np.maximum(a, 0.0) / ((R_min + gamma) * I_s))),
+                      np.minimum(0.0, a + (R_max + gamma) * I_s))
+    if x0 is None:
+        t, x_m = hi.copy(), np.zeros_like(a)
+    else:
+        t, x_m = np.clip(x0[0], lo, hi), np.array(x0[1], dtype=float)
+    i = np.zeros_like(a)
+
+    def evaluate(k, t, x_m):
+        """H(t) - a, its slope, the current, the memristor voltage and convergence, for the cells k."""
+        g, Rn, Rx = gamma[k], R_min[k], R_max[k]
+        e = np.exp(t / c)
+        i = I_s * np.expm1(t / c)
+        x_m, _ = tanh_root(1 / Rx, 1 / Rn - 1 / Rx, i, x_m)
+        f = t + x_m + g * i - a[k]
+        df = 1 + I_s / c * e * (1 / memristor_conductance(x_m, Rn, Rx) + g)
+        return f, df, i, x_m, np.abs(f) <= 1e-13 * (np.abs(t) + np.abs(x_m) + g * np.abs(i) + np.abs(a[k]))
+
+    k = np.arange(a.size)
+    t_k, x_k, lo_k, hi_k = t, x_m, lo, hi
+    f, df, i_k, x_k, done = evaluate(k, t_k, x_k)
+    dx_old = dx = hi_k - lo_k
+    for steps in range(1, 301):
+        if done.any():
+            t[k[done]], x_m[k[done]], i[k[done]] = t_k[done], x_k[done], i_k[done]
+            keep = ~done
+            k, t_k, x_k, i_k, f, df, lo_k, hi_k, dx, dx_old = (
+                arr[keep] for arr in (k, t_k, x_k, i_k, f, df, lo_k, hi_k, dx, dx_old))
+        if k.size == 0:
+            return t + x_m, i, t, x_m, steps - 1
+        lo_k = np.where(f < 0, t_k, lo_k)
+        hi_k = np.where(f > 0, t_k, hi_k)
+        bisect = (((t_k - hi_k) * df - f) * ((t_k - lo_k) * df - f) > 0) | (np.abs(2 * f) > np.abs(dx_old * df))
+        dx_old = dx
+        dx = np.where(bisect, 0.5 * (hi_k - lo_k), f / df)
+        t_k = np.where(bisect, lo_k + dx, t_k - dx)
+        f, df, i_k, x_k, done = evaluate(k, t_k, x_k)
+        done |= np.abs(dx) <= 1e-15 * np.abs(t_k)
+    raise RuntimeError("diode_series_solve: did not converge")

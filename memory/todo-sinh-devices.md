@@ -11,6 +11,8 @@ Idea: a strongly exponential memristor read law, i ~ G sinh(beta v). This is clo
 - Newton overshoots on exponentials. A behavioral source gets no junction-voltage limiting (unlike SPICE's built-in diode), so large beta may force gmin or source stepping.
 - For Spingarn the law is monotone. Its sector is unbounded globally (incremental resistance -> 0), but the no-gain property bounds every device voltage by max |E|, so over the operating range the sector is [R(E_max), R(0)], giving a size-independent bound. However K ~ cosh(beta E_max) grows fast with beta, so the constant may be large.
 
+Update 2026-10-14: exponential devices were tested as Shockley diodes in the 1D1R crossbar ([[diode-models-findings]]). Unlimited Newton (behavioural exp in SPICE, plain in-repo Newton) does struggle: fallbacks, crawls at n V_T per step, Cholesky breakdown. But Newton with a step-halving safeguard took 7-11 its flat and was the fastest solver, so a sinh memristor probably won't favour Spingarn either unless Newton is denied a safeguard.
+
 **Why:** after the 1S1R check ([[selector-1s1r-findings]]) showed that bounded-slope kinks don't hurt Newton, exponential growth is the remaining physical candidate for a Newton disadvantage.
 
 **How to apply:** when the user returns to device models, start with a small feasibility check: SPICE iterations and fallbacks vs beta, alongside Spingarn's iterations and bound. Confirm with the user before running anything larger.

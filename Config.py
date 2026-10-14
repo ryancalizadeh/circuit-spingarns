@@ -3,10 +3,12 @@ from enum import IntEnum
 import numpy as np
 import scipy.sparse as sp
 
-from devices import memristor_conductance, memristor_current, selector_conductance, series_solve
+from devices import (diode_series_solve, memristor_conductance, memristor_current, selector_conductance,
+                     series_solve, shockley_conductance, shockley_current)
 
 GROUND = -1
-DEVICES = ("memristor", "1d1r", "1s1r")
+DEVICES = ("memristor", "1d1r", "1s1r", "1d1r_shockley")
+DIODE_DEVICES = ("1d1r", "1d1r_shockley")
 
 
 def _range(value):
@@ -30,6 +32,7 @@ class BranchKind(IntEnum):
     DEVICE = 2
     SOURCE = 3
     LOAD = 4
+    DIODE = 5  # diodes on branches of their own (internal_node=True); an empty block otherwise
 
 
 class Config:
@@ -60,22 +63,37 @@ class Config:
                      i = g_s(v_s) = g_m(v_m) with v = v_s + v_m, and its incremental resistance ranges over
                      [R_on + R_min, R_off + R_max]: finite, so the cell is strongly monotone however sharp the knee.
                      The selector's R_on, R_off, V_th and delta are the same for every cell.
+        "1d1r_shockley"  a Shockley diode i = I_s (e^{v_d / (n V_T)} - 1) in series with the memristor, treated as one
+                     branch (a "lumped" cell): i = g_d(v_d) = g_m(v_m) with v = v_d + v_m (devices.diode_series_solve).
+                     The diode's incremental resistance n V_T / (i + I_s) runs from ~0 to infinity, so the cell's sector
+                     is [R_min, inf), like the ideal 1D1R cell's. I_s, n and V_T are the same for every cell.
+
+    internal_node=True (1D1R cells only) puts each cell's diode on a branch of its own: from w[r, c] to a new internal node
+    m[r, c], with the memristor on from m[r, c] to b[r, c]. The diode is the ideal one for device "1d1r" and the Shockley
+    one for "1d1r_shockley"; the physical circuit is the same as the lumped cell's, only the formulation differs. The
+    memristors keep the DEVICE block and the diodes form the DIODE block, of sector [0, inf): the Shockley diode's
+    incremental resistance ranges over (0, inf), the ideal diode's is 0 (conducting) or inf (blocking). An ideal diode on
+    its own branch is set-valued (v <= 0, i >= 0, v i = 0), not a function of its voltage, so current() gives both
+    branches of such a cell the lumped cell's current g_m(max(v_d + v_m, 0)), which is exact at a solution, and
+    conductance() refuses: a conducting ideal diode has no finite conductance.
 
     Indices are zero-based. Ground is the reference node and is not numbered, which leaves 2pq nodes:
-    word nodes first, then bit nodes, each row-major over (r, c). The m = 3pq branches are numbered in
-    blocks of p(q-1) word wires, q(p-1) bit wires, pq devices, p sources and q loads, each block
-    row-major over (r, c); `slices` maps each BranchKind to its block.
+    word nodes first, then bit nodes, each row-major over (r, c), and with internal_node pq internal nodes after them
+    (3pq in all). The m = 3pq branches are numbered in blocks of p(q-1) word wires, q(p-1) bit wires, pq devices, p
+    sources and q loads, each block row-major over (r, c), and with internal_node pq diodes after them (4pq in all);
+    `slices` maps each BranchKind to its block (DIODE's is empty without internal_node).
 
     Branch k runs from node tail[k] to node head[k] with associated reference directions:
     v[k] = u[tail[k]] - u[head[k]] and i[k] flows from tail to head through the branch, so v[k] * i[k]
-    is the power it absorbs. Devices run from w[r, c] to b[r, c]; sources and loads run to ground.
+    is the power it absorbs. Devices run from w[r, c] to b[r, c] (with internal_node from m[r, c] to b[r, c], and diodes
+    from w[r, c] to m[r, c]); sources and loads run to ground.
 
     An object of this class is used to initialize a simulation study.
     """
 
     def __init__(self, num_word_lines, num_bit_lines, R_min=1e3, R_max=100e3, R_wire=5.0,
                  R_source=50.0, R_load=1e3, E_range=(0.1, 0.5), seed=None, device="memristor", R_on=1e3, R_off=1e6,
-                 V_th=0.5, delta=0.01):
+                 V_th=0.5, delta=0.01, I_s=1e-14, n=1.0, V_T=0.02585, internal_node=False):
         if num_word_lines < 1 or num_bit_lines < 1:
             raise ValueError("need at least one word line and one bit line")
         (min_lo, min_hi), (max_lo, max_hi) = _range(R_min), _range(R_max)
@@ -87,6 +105,10 @@ class Config:
             raise ValueError(f"device must be one of {DEVICES}, not {device!r}")
         if device == "1s1r" and not (0 < R_on <= R_off and 0 <= delta < V_th):
             raise ValueError("a 1S1R selector needs 0 < R_on <= R_off and 0 <= delta < V_th")
+        if device == "1d1r_shockley" and not min(I_s, n, V_T) > 0:
+            raise ValueError("a Shockley diode needs I_s, n and V_T > 0")
+        if internal_node and device not in DIODE_DEVICES:
+            raise ValueError(f"internal_node needs a 1D1R cell, one of {DIODE_DEVICES}, not {device!r}")
 
         self.p = p = num_word_lines
         self.q = q = num_bit_lines
@@ -94,25 +116,34 @@ class Config:
         self.R_wire, self.R_source, self.R_load = R_wire, R_source, R_load
         self.E_range, self.seed, self.device = tuple(E_range), seed, device
         self.R_on, self.R_off, self.V_th, self.delta = R_on, R_off, V_th, delta
+        self.I_s, self.n, self.V_T = I_s, n, V_T
+        self.internal_node = bool(internal_node)
+        # the law of the DEVICE block's branches, and of the DIODE block's (None: no such block)
+        self.device_law = "memristor" if self.internal_node else device
+        self.diode_law = {"1d1r": "ideal", "1d1r_shockley": "shockley"}[device] if self.internal_node else None
         rng = np.random.default_rng(seed)
         self.E = rng.uniform(*E_range, size=p)
         # Drawn after E, so a circuit with fixed R_min and R_max is exactly the one its seed always gave.
         self.R_min_cell = _log_uniform(rng, (min_lo, min_hi), p * q)
         self.R_max_cell = _log_uniform(rng, (max_lo, max_hi), p * q)
 
-        self.num_nodes = 2 * p * q
-        self.num_branches = 3 * p * q
+        self.num_nodes = (3 if self.internal_node else 2) * p * q
+        self.num_branches = (4 if self.internal_node else 3) * p * q
 
         r, c = np.indices((p, q))
         w, b = self.word_node(r, c), self.bit_node(r, c)
+        m = self.mid_node(r, c) if self.internal_node else np.zeros((0, 0), dtype=int)
         blocks = [
             (BranchKind.WORD_WIRE, w[:, :-1], w[:, 1:], R_wire, R_wire),
             (BranchKind.BIT_WIRE, b[:-1, :], b[1:, :], R_wire, R_wire),
-            (BranchKind.DEVICE, w, b, *{"memristor": (self.R_min_cell, self.R_max_cell),
-                                        "1d1r": (self.R_min_cell, np.inf),
-                                        "1s1r": (R_on + self.R_min_cell, R_off + self.R_max_cell)}[device]),
+            (BranchKind.DEVICE, m if self.internal_node else w, b,
+             *{"memristor": (self.R_min_cell, self.R_max_cell),
+               "1d1r": (self.R_min_cell, np.inf),
+               "1d1r_shockley": (self.R_min_cell, np.inf),
+               "1s1r": (R_on + self.R_min_cell, R_off + self.R_max_cell)}[self.device_law]),
             (BranchKind.SOURCE, w[:, 0], np.full(p, GROUND), R_source, R_source),
             (BranchKind.LOAD, b[-1, :], np.full(q, GROUND), R_load, R_load),
+            (BranchKind.DIODE, w if self.internal_node else m, m, 0.0, np.inf),
         ]
 
         self.slices = {}
@@ -132,7 +163,8 @@ class Config:
         self.kind = np.concatenate(kind)
         self.tail = np.concatenate(tail)
         self.head = np.concatenate(head)
-        # Sector bounds on each branch's incremental resistance; equal for the linear branches, r_hi = inf for 1D1R cells.
+        # Sector bounds on each branch's incremental resistance; equal for the linear branches, r_hi = inf for 1D1R cells,
+        # [0, inf] for diodes on branches of their own.
         self.r_lo = np.concatenate(r_lo)
         self.r_hi = np.concatenate(r_hi)
         # Source EMF in series with each branch, nonzero only on sources: i = (v - emf) / R_source.
@@ -147,6 +179,10 @@ class Config:
                       E_range=list(self.E_range), seed=self.seed, device=self.device)
         if self.device == "1s1r":
             params.update(R_on=self.R_on, R_off=self.R_off, V_th=self.V_th, delta=self.delta)
+        if self.device == "1d1r_shockley":
+            params.update(I_s=self.I_s, n=self.n, V_T=self.V_T)
+        if self.internal_node:
+            params.update(internal_node=True)
         return params
 
     def word_node(self, r, c):
@@ -156,6 +192,27 @@ class Config:
     def bit_node(self, r, c):
         """Index of node b[r, c]; accepts arrays."""
         return self.p * self.q + r * self.q + c
+
+    def mid_node(self, r, c):
+        """Index of the internal node m[r, c] between a cell's diode and memristor (internal_node only); accepts arrays."""
+        return 2 * self.p * self.q + r * self.q + c
+
+    def line_potentials(self, v):
+        """
+        Potentials of the 2pq word and bit nodes (in node order) read off branch voltages v along the lines: from each
+        source's voltage along its word line, and from each load's voltage up its bit line. These linear branches form a
+        spanning tree of the word and bit nodes, so the potentials are exact when v satisfies KVL, and they compare
+        solutions of the lumped and internal-node formulations of the same circuit, which share these nodes and branches.
+        """
+        p, q = self.p, self.q
+        word = np.zeros((p, q))
+        word[:, 0] = v[self.slices[BranchKind.SOURCE]]
+        word[:, 1:] = word[:, :1] - np.cumsum(v[self.slices[BranchKind.WORD_WIRE]].reshape(p, q - 1), axis=1)
+        bit = np.zeros((p, q))
+        bit[-1] = v[self.slices[BranchKind.LOAD]]
+        # bit wire (r, c) runs from b[r, c] to b[r + 1, c]: b[r] = b[r + 1] + v
+        bit[:-1] = bit[-1] + np.cumsum(v[self.slices[BranchKind.BIT_WIRE]].reshape(p - 1, q)[::-1], axis=0)[::-1]
+        return np.concatenate([word.ravel(), bit.ravel()])
 
     def incidence(self):
         """
@@ -172,39 +229,68 @@ class Config:
 
     def current(self, v, x0=None):
         """Branch currents i = g(v) for a vector of all m branch voltages. x0 optionally warm-starts the series solve of
-        1S1R cells (their selector and memristor voltages); it changes the cost, not the result."""
+        1S1R and lumped Shockley 1D1R cells (their two inner voltages); it changes the cost, not the result. An ideal diode
+        on its own branch carries its cell's lumped current (see the class docstring)."""
         i = (v - self.emf) / self.r_hi
         d = self.slices[BranchKind.DEVICE]
         i[d] = self.device_current(v[d], x0)
+        if self.diode_law == "ideal":
+            e = self.slices[BranchKind.DIODE]
+            i[d] = i[e] = memristor_current(np.maximum(v[d] + v[e], 0.0), self.R_min_cell, self.R_max_cell)
+        elif self.diode_law == "shockley":
+            e = self.slices[BranchKind.DIODE]
+            i[e] = shockley_current(v[e], self.I_s, self.n * self.V_T)
         return i
 
     def conductance(self, v):
         """Incremental branch conductances g'(v), each within [1 / r_hi, 1 / r_lo]. At a 1D1R cell's kink (v = 0) this
         is the reverse-bias value 0, one end of the subdifferential [0, 1 / R_min]."""
+        if self.diode_law == "ideal":
+            raise ValueError("an ideal diode on its own branch has no finite conductance")
         g = 1 / self.r_hi
         d = self.slices[BranchKind.DEVICE]
         g[d] = self.device_conductance(v[d])
+        if self.diode_law == "shockley":
+            e = self.slices[BranchKind.DIODE]
+            g[e] = shockley_conductance(v[e], self.I_s, self.n * self.V_T)
         return g
 
     def device_current(self, v, x0=None):
-        """Currents of the pq cells at cell voltages v; x0 as in current()."""
-        if self.device == "1s1r":
+        """Currents of the pq cells (with internal_node, of their memristors) at cell voltages v; x0 as in current()."""
+        if self.device_law == "1s1r":
             return self.series_solve(v, 0.0, x0)[1]
-        if self.device == "1d1r":
+        if self.device_law == "1d1r_shockley":
+            return self.diode_series_solve(v, 0.0, x0)[1]
+        if self.device_law == "1d1r":
             v = np.maximum(v, 0.0)
         return memristor_current(v, self.R_min_cell, self.R_max_cell)
 
     def device_conductance(self, v):
-        """Incremental conductances of the pq cells at cell voltages v."""
-        if self.device == "1s1r":
+        """Incremental conductances of the pq cells (with internal_node, of their memristors) at cell voltages v."""
+        if self.device_law == "1s1r":
             _, _, v_s, v_m, _ = self.series_solve(v)
             return 1 / (1 / selector_conductance(v_s, self.R_on, self.R_off, self.V_th, self.delta)
                         + 1 / memristor_conductance(v_m, self.R_min_cell, self.R_max_cell))
+        if self.device_law == "1d1r_shockley":
+            _, _, v_d, v_m, _ = self.diode_series_solve(v)
+            return self.diode_series_conductance(v_d, v_m)
         g = memristor_conductance(v, self.R_min_cell, self.R_max_cell)
-        return np.where(v > 0, g, 0.0) if self.device == "1d1r" else g
+        return np.where(v > 0, g, 0.0) if self.device_law == "1d1r" else g
+
+    def diode_series_conductance(self, v_d, v_m):
+        """Incremental conductance of lumped Shockley 1D1R cells whose diode and memristor sit at v_d and v_m: the series
+        combination, 0 where the diode's conductance underflows in deep reverse bias."""
+        with np.errstate(divide="ignore"):
+            return 1 / (1 / shockley_conductance(v_d, self.I_s, self.n * self.V_T)
+                        + 1 / memristor_conductance(v_m, self.R_min_cell, self.R_max_cell))
 
     def series_solve(self, a, gamma=0.0, x0=None):
         """devices.series_solve for this circuit's 1S1R cells: with gamma = 0 the cells at cell voltages a, otherwise
         their resolvent. Returns the cell voltages, currents, selector and memristor voltages, and the steps taken."""
         return series_solve(a, gamma, self.R_min_cell, self.R_max_cell, self.R_on, self.R_off, self.V_th, self.delta,
                             x0)
+
+    def diode_series_solve(self, a, gamma=0.0, x0=None):
+        """devices.diode_series_solve for this circuit's lumped Shockley 1D1R cells, as series_solve for 1S1R cells.
+        Returns the cell voltages, currents, diode and memristor voltages, and the steps taken."""
+        return diode_series_solve(a, gamma, self.R_min_cell, self.R_max_cell, self.I_s, self.n * self.V_T, x0)

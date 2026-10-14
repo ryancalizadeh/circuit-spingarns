@@ -74,6 +74,27 @@ def test_rejects_empty_leaves():
     assert False, "accepted leaf_size=0"
 
 
+def test_internal_nodes_first_add_no_fill():
+    """With internal nodes (a diode on its own branch per cell) the ordering eliminates them first and then the word and
+    bit nodes as before. Each has degree 2, so eliminating it creates exactly the lumped cell's word-bit edge: the factor
+    holds the lumped factor plus the internal nodes' own columns of 3 entries, lnz + 3pq, and no other fill."""
+    import scipy.sparse as sp
+    from algorithms.spingarns import factorize, port_resistances
+    for p, q in [(1, 1), (3, 4), (13, 7), (64, 64)]:
+        lnz = {}
+        for internal in (False, True):
+            cfg = Config(p, q, seed=0, device="1d1r_shockley", internal_node=internal)
+            perm = nested_dissection(cfg)
+            assert np.array_equal(np.sort(perm), np.arange(cfg.num_nodes))
+            if internal:
+                assert np.array_equal(perm[:p * q], np.arange(2 * p * q, 3 * p * q))
+                assert np.array_equal(perm[p * q:], nested_dissection(Config(p, q, seed=0)))
+            A = cfg.incidence()
+            K = A @ sp.diags(1 / port_resistances(cfg, "r_lo")) @ A.T
+            lnz[internal] = factorize(K, "cholmod", perm)[1]["lnz"]
+        assert lnz[True] == lnz[False] + 3 * p * q, (p, q, lnz)
+
+
 if __name__ == "__main__":
     tests = [f for name, f in sorted(globals().items()) if name.startswith("test_") and callable(f)]
     for t in tests:

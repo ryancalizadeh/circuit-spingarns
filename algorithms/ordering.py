@@ -18,6 +18,11 @@ sideways ran through w[:, c]. They stay with the left half, where later horizont
 a cut row likewise stay with the top half. A region is therefore the tuple (r0, r1, c0, c1, ew, eb): word nodes in rows
 [r0, r1 + ew) x columns [c0, c1) and bit nodes in rows [r0, r1) x columns [c0, c1 + eb), where ew and eb (0 or 1) count
 a stranded word row below and a stranded bit column to the right.
+
+With internal_node (Config), each cell's diode and memristor meet at an internal node m[r, c] whose only neighbours are
+w[r, c] and b[r, c]. Those nodes go first: eliminating a node of degree 2 joins its two neighbours, which creates exactly
+the word-bit edge of the lumped cell, so what remains is the lumped crossbar's matrix, ordered as above, and the factor
+gains only the internal nodes' own columns (3 entries each) over the lumped one.
 """
 import numpy as np
 
@@ -72,7 +77,7 @@ def _expand(q, blocks):
 
 def nested_dissection(cfg, leaf_size=LEAF_SIZE):
     """
-    Geometric nested-dissection ordering of cfg's 2pq nodes (see the module docstring): perm[k] is the k-th node to
+    Geometric nested-dissection ordering of cfg's nodes (see the module docstring): perm[k] is the k-th node to
     eliminate, so the matrix to factorize is K[perm][:, perm]. Regions of at most leaf_size nodes are numbered in natural
     order.
     """
@@ -91,5 +96,8 @@ def nested_dissection(cfg, leaf_size=LEAF_SIZE):
 
     dissect((0, cfg.p, 0, cfg.q, 0, 0))
     perm = _expand(cfg.q, blocks)
+    if cfg.internal_node:
+        pq = cfg.p * cfg.q
+        perm = np.concatenate([np.arange(2 * pq, 3 * pq), perm])
     assert perm.size == cfg.num_nodes
     return perm

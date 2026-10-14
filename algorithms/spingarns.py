@@ -33,6 +33,11 @@ circuit, gets a very large one. A re-match changes the values of A Gamma^{-1} A^
 the numeric factorization is redone. The resolvent is a bijection between incident waves and points of the branch
 graph, so the iterate carries over exactly: the branch point (v, i) is kept and a = v + Gamma i recomputed in the new
 waves. Re-matches stop after a fixed number, after which the fixed-Gamma theory above applies to the rest of the run.
+
+Diodes on branches of their own (Config's internal_node) get their own port resistance rule (diode_port_resistances)
+and resolvent (diode_resolvent): the Shockley diode's in closed form, the ideal diode's v = min(a, 0). Their sector
+[0, inf) has no finite matching, so the a priori bound is 1; an ideal diode reflects fully in both states (b = -|a|)
+whatever its port resistance. Adaptive matching re-matches them like cells, within [diode_floor, open_resistance].
 """
 import ctypes
 import functools
@@ -47,18 +52,20 @@ import scipy.sparse.linalg as spla
 from cvxopt import cholmod
 
 from Config import BranchKind
-from devices import memristor_conductance, selector_conductance, tanh_root
+from devices import (memristor_conductance, selector_conductance, shockley_conductance, shockley_resolvent,
+                     tanh_root)
 from algorithms.common import Solver, SolveOutput, kcl_check
 from algorithms.ordering import nested_dissection
 
 GAMMA_RULES = ("geometric", "r_lo")
+DIODE_GAMMA_RULES = ("r_min", "zero_bias")
 FACTORIZATIONS = ("cholmod", "slu")
 # "builtin" leaves the ordering to the factorization library: minimum degree on A + A^T for SuperLU, and CHOLMOD's default
 # strategy, which is AMD in cvxopt's build (compiled without METIS, so CHOLMOD has no nested dissection of its own).
 ORDERINGS = ("nested_dissection", "builtin")
 
 
-def port_resistances(cfg, rule):
+def port_resistances(cfg, rule, diode_rule="r_min"):
     """
     Gamma's diagonal, one port resistance per branch. Linear branches get their own resistance. Each device, whose
     incremental resistance ranges over its sector [r_lo, r_hi] (that cell's own values), gets by `rule`:
@@ -70,7 +77,7 @@ def port_resistances(cfg, rule):
 
     A 1D1R cell's sector is unbounded (r_hi = inf), so "geometric" uses its memristor's range [R_min, R_max]. Its rule
     only matters while the diode conducts: reverse-biased, the cell is open and reflects its wave unchanged (factor +1)
-    whatever its port resistance.
+    whatever its port resistance. Diodes on branches of their own get diode_port_resistances(cfg, diode_rule).
     """
     gamma = cfg.r_hi.copy()  # r_lo = r_hi = R on linear branches
     d = cfg.slices[BranchKind.DEVICE]
@@ -80,7 +87,28 @@ def port_resistances(cfg, rule):
         gamma[d] = cfg.r_lo[d]
     else:
         gamma[d] = float(rule)
+    if cfg.diode_law is not None:
+        gamma[cfg.slices[BranchKind.DIODE]] = diode_port_resistances(cfg, diode_rule)
     return gamma
+
+
+def diode_port_resistances(cfg, rule):
+    """
+    Port resistances of the pq diodes on branches of their own (Config's internal_node), by `rule`:
+
+        "r_min"      the cell's memristor R_min, so diode and memristor start alike;
+        "zero_bias"  the Shockley diode's zero-bias incremental resistance n V_T / I_s (not defined for the ideal diode);
+        a number     that resistance in ohms, for every diode.
+
+    A diode's sector [0, inf) has no finite end to match to, so every rule is a fixed positive resistance.
+    """
+    if rule == "r_min":
+        return cfg.R_min_cell.copy()
+    if rule == "zero_bias":
+        if cfg.diode_law != "shockley":
+            raise ValueError("diode_gamma='zero_bias' needs Shockley diodes; an ideal diode's is 0 or inf")
+        return np.full(cfg.p * cfg.q, cfg.n * cfg.V_T / cfg.I_s)
+    return np.full(cfg.p * cfg.q, float(rule))
 
 
 def reflection(R, gamma):
@@ -114,24 +142,52 @@ def device_resolvent(a, gamma, R_min, R_max, v0, diode=False):
     return (np.where(a > 0, v, a) if diode else v), steps
 
 
+def has_series_cells(cfg):
+    """Whether cfg's cells are two elements in series solved together (1S1R, lumped Shockley 1D1R), whose warm start is
+    the pair of inner voltages rather than the cell voltage."""
+    return cfg.device_law in ("1s1r", "1d1r_shockley")
+
+
 def cell_resolvent(cfg, a, gamma, warm):
     """
-    J_{gamma T}(a) on cfg's pq cells, whatever their device: the cell voltages, the steps taken, and the warm start for
-    the next call. warm is the previous cell voltages, or for 1S1R cells the previous (selector, memristor) voltages or
-    None; a 1S1R cell's resolvent is devices.series_solve.
+    J_{gamma T}(a) on cfg's pq cells (with internal_node, their memristors), whatever their device: the cell voltages, the
+    steps taken, and the warm start for the next call. warm is the previous cell voltages, or for series cells (see
+    has_series_cells) the previous pair of inner voltages or None; their resolvents are devices.series_solve (1S1R) and
+    devices.diode_series_solve (lumped Shockley 1D1R).
     """
-    if cfg.device == "1s1r":
+    if cfg.device_law == "1s1r":
         v, _, v_s, v_m, steps = cfg.series_solve(a, gamma, warm)
         return v, steps, (v_s, v_m)
-    v, steps = device_resolvent(a, gamma, cfg.R_min_cell, cfg.R_max_cell, warm, diode=cfg.device == "1d1r")
+    if cfg.device_law == "1d1r_shockley":
+        v, _, v_d, v_m, steps = cfg.diode_series_solve(a, gamma, warm)
+        return v, steps, (v_d, v_m)
+    v, steps = device_resolvent(a, gamma, cfg.R_min_cell, cfg.R_max_cell, warm, diode=cfg.device_law == "1d1r")
     return v, steps, v
+
+
+def diode_resolvent(cfg, a, gamma):
+    """J_{gamma T}(a) on cfg's pq diodes on branches of their own: the diode voltages. An ideal diode is open for a <= 0
+    (v = a) and a short for a > 0 (v = 0, i = a / gamma); a Shockley diode's is devices.shockley_resolvent."""
+    if cfg.diode_law == "ideal":
+        return np.minimum(a, 0.0)
+    return shockley_resolvent(a, gamma, cfg.I_s, cfg.n * cfg.V_T)
+
+
+def diode_conductance(cfg, v, i):
+    """Incremental conductances of cfg's diodes on branches of their own at the branch point (v, i): inf for a conducting
+    ideal diode (i > 0), 0 for a blocking one."""
+    if cfg.diode_law == "ideal":
+        return np.where(i > 0, np.inf, 0.0)
+    return shockley_conductance(v, cfg.I_s, cfg.n * cfg.V_T)
 
 
 def cell_conductance(cfg, v, warm):
     """Incremental conductances of cfg's pq cells at cell voltages v, 0 for an open 1D1R cell. warm is what
-    cell_resolvent returned with v; for 1S1R cells it holds their (selector, memristor) voltages, which saves the series
-    solve that Config.device_conductance would do."""
-    if cfg.device != "1s1r":
+    cell_resolvent returned with v; for series cells it holds their two inner voltages, which saves the series solve
+    that Config.device_conductance would do."""
+    if cfg.device_law == "1d1r_shockley":
+        return cfg.diode_series_conductance(*warm)
+    if cfg.device_law != "1s1r":
         return cfg.device_conductance(v)
     v_s, v_m = warm
     return 1 / (1 / selector_conductance(v_s, cfg.R_on, cfg.R_off, cfg.V_th, cfg.delta)
@@ -290,7 +346,8 @@ class SpingarnSolver(Solver):
 
     gamma picks the devices' port resistance (see port_resistances); None selects the class's default_gamma. This class
     matches the devices at zero bias, where the crossbar's devices mostly operate; SpingarnSectorSolver matches them over
-    their whole sector. alpha in (0, 1] is the relaxation: 1/2 is Spingarn's original method, and 1 contracts fastest
+    their whole sector. diode_gamma picks the port resistance of diodes on branches of their own (internal_node; see
+    diode_port_resistances) and is unused otherwise. alpha in (0, 1] is the relaxation: 1/2 is Spingarn's original method, and 1 contracts fastest
     when every branch is strictly increasing, as here. abstol is the absolute current tolerance of the KCL test, as in
     SPICE.
 
@@ -312,7 +369,7 @@ class SpingarnSolver(Solver):
     default_ordering = "nested_dissection"
 
     def __init__(self, tol=None, max_iterations=None, gamma=None, alpha=None, abstol=1e-12, factorization=None,
-                 ordering=None, blas_threads=1):
+                 ordering=None, blas_threads=1, diode_gamma="r_min"):
         gamma = self.default_gamma if gamma is None else gamma
         alpha = self.default_alpha if alpha is None else alpha
         factorization = self.default_factorization if factorization is None else factorization
@@ -327,8 +384,12 @@ class SpingarnSolver(Solver):
             raise ValueError(f"ordering must be one of {ORDERINGS}, not {ordering!r}")
         if not (blas_threads is None or type(blas_threads) is int and blas_threads >= 1):
             raise ValueError(f"blas_threads must be a positive integer or None, not {blas_threads!r}")
+        if not (diode_gamma in DIODE_GAMMA_RULES if isinstance(diode_gamma, str)
+                else isinstance(diode_gamma, (int, float)) and not isinstance(diode_gamma, bool) and diode_gamma > 0):
+            raise ValueError(f"diode_gamma must be one of {DIODE_GAMMA_RULES} or a positive resistance, "
+                             f"not {diode_gamma!r}")
         super().__init__(tol, max_iterations, gamma=gamma, alpha=alpha, abstol=abstol, factorization=factorization,
-                         ordering=ordering, blas_threads=blas_threads)
+                         ordering=ordering, blas_threads=blas_threads, diode_gamma=diode_gamma)
         if self.max_iterations < 1:
             raise ValueError("max_iterations must be at least 1")
 
@@ -346,7 +407,7 @@ class SpingarnSolver(Solver):
         t = time.perf_counter()
         A = cfg.incidence()
         AT = A.T.tocsr()
-        gamma = port_resistances(cfg, self.options["gamma"])
+        gamma = port_resistances(cfg, self.options["gamma"], self.options["diode_gamma"])
         K = A @ sp.diags(1 / gamma) @ AT
         perm, ordering_time = None, 0.0
         if self.options["ordering"] == "nested_dissection":
@@ -361,14 +422,16 @@ class SpingarnSolver(Solver):
         history["contraction_bound"] = contraction_bound(cfg, gamma, alpha)
 
         d = cfg.slices[BranchKind.DEVICE]
+        e = cfg.slices[BranchKind.DIODE] if cfg.diode_law is not None else None
         # J_{gamma T}(a) = lin_gain * a + lin_offset on linear branches; written to stay finite where r_hi = inf (1D1R
-        # cells, whose entries are overwritten by the device resolvent anyway)
+        # cells and diodes, whose entries are overwritten by their resolvents anyway)
         lin_gain = 1 / (1 + gamma / cfg.r_hi)
         lin_offset = gamma * cfg.emf / (cfg.r_hi + gamma)
         weight = 1 / gamma
         matching = self._matching(cfg)
         relax = alpha  # per branch once SpingarnAdaptiveSplitSolver has open cells
-        warm = None if cfg.device == "1s1r" else np.zeros(cfg.p * cfg.q)
+        series = has_series_cells(cfg)
+        warm = None if series else np.zeros(cfg.p * cfg.q)
         a = np.zeros(cfg.num_branches)
         w = np.zeros(cfg.num_nodes)  # node potentials of M a
         v = np.zeros(cfg.num_branches)
@@ -381,19 +444,20 @@ class SpingarnSolver(Solver):
             newton_steps += steps
             v = lin_gain * a + lin_offset
             v[d] = v_dev
+            if e is not None:
+                v[e] = diode_resolvent(cfg, a[e], gamma[e])
             b = 2 * v - a
             i = (a - b) / (2 * gamma)
 
-            # adaptive matching: new port resistances for the cells, the same branch point (v, i) in the new waves. Only
-            # cells change, so the linear branches' maps stay as they are.
-            gamma_dev = None if matching is None else matching.update(k, v_dev, warm, gamma[d])
-            if gamma_dev is not None:
+            # adaptive matching: new port resistances for the cells (and diodes), in place, the same branch point (v, i)
+            # in the new waves. Only those change, so the linear branches' maps stay as they are.
+            if matching is not None and matching.update(k, v, i, warm, gamma):
                 t_refactor = time.perf_counter()
-                gamma[d] = gamma_dev
                 weight = 1 / gamma
                 solve_K.refactor(A @ sp.diags(weight) @ AT)
-                a[d] = v_dev + gamma_dev * i[d]
-                b[d] = v_dev - gamma_dev * i[d]
+                for blk in matching.blocks:
+                    a[blk] = v[blk] + gamma[blk] * i[blk]
+                    b[blk] = v[blk] - gamma[blk] * i[blk]
                 w = solve_K(A @ (a * weight))
                 relax = matching.relaxation(alpha, gamma)
                 refactor_time += time.perf_counter() - t_refactor
@@ -406,9 +470,8 @@ class SpingarnSolver(Solver):
 
             # (v, i) against KCL and KVL, through the node potentials u of M v = (M a + M b) / 2
             u = (w + u_b) / 2
-            # 1S1R cells: warm-start the test's series solve from this iteration's cell states
-            v_u, _, kcl_ok, kcl_abs, kcl_rel = kcl_check(cfg, u, self.tol, abstol, A,
-                                                         warm if cfg.device == "1s1r" else None)
+            # series cells: warm-start the test's series solve from this iteration's cell states
+            v_u, _, kcl_ok, kcl_abs, kcl_rel = kcl_check(cfg, u, self.tol, abstol, A, warm if series else None)
             v_max, kvl_abs = np.abs(v).max(), np.abs(v - v_u).max()
             kcl.append(kcl_rel)
             kvl.append(float(kvl_abs / v_max) if v_max > 0 else 0.0)
@@ -426,7 +489,7 @@ class SpingarnSolver(Solver):
                        newton_steps=newton_steps, kcl_history=kcl, kvl_history=kvl, fixed_point_history=fixed_point)
         if matching is not None:
             history.update(rematches=len(matching.log), rematch_log=matching.log, refactor_time=refactor_time,
-                           open_cells=int(np.sum(gamma[d] >= matching.open_resistance)))
+                           open_cells=matching.count_open(gamma))
         return SolveOutput(v, i, converged, k + 1, history)
 
 
@@ -456,38 +519,56 @@ class _Rematching:
     One solve's re-matching state for SpingarnAdaptiveSolver. At iterations every, 2 every, ..., at most limit times,
     each cell whose port resistance reflects more than threshold against its incremental resistance at the current
     iterate gets that resistance, clipped to the cell's sector and capped at open_resistance (which an open 1D1R cell,
-    of infinite incremental resistance, gets). log records [iteration, cells re-matched, cells open after it] for each
-    re-match, and last the cells' port resistances after the latest (None before the first).
+    of infinite incremental resistance, gets). Diodes on branches of their own (internal_node) are re-matched the same
+    way, clipped to [diode_floor, open_resistance]: a conducting diode's incremental resistance may be ~0, and a port
+    resistance may not. blocks are the branch blocks re-matched. log records [iteration, branches re-matched, branches
+    open after it] for each re-match, and last the cells' port resistances after the latest (None before the first).
     """
 
-    def __init__(self, cfg, every, limit, threshold, open_resistance, open_alpha):
+    def __init__(self, cfg, every, limit, threshold, open_resistance, open_alpha, diode_floor):
         d = cfg.slices[BranchKind.DEVICE]
         self.cfg, self.d, self.every, self.limit, self.threshold = cfg, d, every, limit, threshold
-        self.open_resistance, self.open_alpha = open_resistance, open_alpha
+        self.open_resistance, self.open_alpha, self.diode_floor = open_resistance, open_alpha, diode_floor
         self.lo, self.hi = cfg.r_lo[d], np.minimum(cfg.r_hi[d], open_resistance)
+        self.e = cfg.slices[BranchKind.DIODE] if cfg.diode_law is not None else None
+        self.blocks = (d,) if self.e is None else (d, self.e)
         self.log, self.last = [], None
 
-    def update(self, k, v_dev, warm, gamma_dev):
-        """The cells' new port resistances at iteration k, or None if no re-match is due or no cell needs one."""
+    def update(self, k, v, i, warm, gamma):
+        """Re-match at iteration k, given the branch point (v, i) and the cells' warm start from their resolvent:
+        writes the new port resistances into gamma and returns True, or returns False if no re-match is due or no
+        branch needs one."""
         if k == 0 or k % self.every or len(self.log) >= self.limit:
-            return None
+            return False
+        d, e = self.d, self.e
         with np.errstate(divide="ignore"):
-            target = np.clip(1 / cell_conductance(self.cfg, v_dev, warm), self.lo, self.hi)
-        change = np.abs(reflection(target, gamma_dev)) > self.threshold
-        if not change.any():
-            return None
-        gamma_dev = np.where(change, target, gamma_dev)
-        self.log.append([k, int(change.sum()), int(np.sum(gamma_dev >= self.open_resistance))])
-        self.last = gamma_dev
-        return gamma_dev
+            targets = [np.clip(1 / cell_conductance(self.cfg, v[d], warm), self.lo, self.hi)]
+            if e is not None:
+                targets.append(np.clip(1 / diode_conductance(self.cfg, v[e], i[e]), self.diode_floor,
+                                       self.open_resistance))
+        changes = [np.abs(reflection(target, gamma[blk])) > self.threshold
+                   for target, blk in zip(targets, self.blocks)]
+        if not any(change.any() for change in changes):
+            return False
+        for target, change, blk in zip(targets, changes, self.blocks):
+            gamma[blk] = np.where(change, target, gamma[blk])
+        self.log.append([k, int(sum(change.sum() for change in changes)), self.count_open(gamma)])
+        self.last = gamma[d].copy()
+        return True
+
+    def count_open(self, gamma):
+        """The cells and diodes matched as open circuits under port resistances gamma."""
+        return int(sum(np.sum(gamma[blk] >= self.open_resistance) for blk in self.blocks))
 
     def relaxation(self, alpha, gamma):
-        """The relaxation under port resistances gamma: alpha, or per branch with open_alpha on the open cells."""
-        is_open = gamma[self.d] >= self.open_resistance
-        if self.open_alpha is None or not is_open.any():
+        """The relaxation under port resistances gamma: alpha, or per branch with open_alpha on the open cells (and
+        diodes)."""
+        is_open = [gamma[blk] >= self.open_resistance for blk in self.blocks]
+        if self.open_alpha is None or not any(o.any() for o in is_open):
             return alpha
         relax = np.full(gamma.size, alpha)
-        relax[self.d] = np.where(is_open, self.open_alpha, alpha)
+        for o, blk in zip(is_open, self.blocks):
+            relax[blk] = np.where(o, self.open_alpha, alpha)
         return relax
 
 
@@ -496,7 +577,8 @@ class SpingarnAdaptiveSolver(SpingarnSolver):
     SpingarnSolver with adaptive matching (see the module docstring): starting from gamma (zero-bias matching by
     default), every rematch_every iterations each cell whose port resistance reflects more than threshold against its
     incremental resistance at the current iterate is re-matched to it, which costs one numeric refactorization. A
-    reverse-biased 1D1R cell is open, and gets open_resistance. After max_rematches re-matches Gamma stays fixed, so the
+    reverse-biased 1D1R cell is open, and gets open_resistance; diodes on branches of their own are re-matched within
+    [diode_floor, open_resistance]. After max_rematches re-matches Gamma stays fixed, so the
     run ends as a fixed-Gamma iteration: convergent for alpha < 1 on 1D1R cells, contracting for any alpha on cells
     with a bounded sector.
 
@@ -516,7 +598,7 @@ class SpingarnAdaptiveSolver(SpingarnSolver):
     default_open_alpha = None
 
     def __init__(self, tol=None, max_iterations=None, rematch_every=2, max_rematches=50, threshold=0.5,
-                 open_resistance=1e8, open_alpha=None, **options):
+                 open_resistance=1e8, open_alpha=None, diode_floor=1.0, **options):
         open_alpha = self.default_open_alpha if open_alpha is None else open_alpha
         if not (type(rematch_every) is int and rematch_every >= 1):
             raise ValueError(f"rematch_every must be a positive integer, not {rematch_every!r}")
@@ -528,14 +610,16 @@ class SpingarnAdaptiveSolver(SpingarnSolver):
             raise ValueError(f"open_resistance must be positive, not {open_resistance!r}")
         if not (open_alpha is None or 0 < open_alpha <= 1):
             raise ValueError(f"open_alpha must lie in (0, 1] or be None, not {open_alpha!r}")
+        if not 0 < diode_floor < open_resistance:
+            raise ValueError(f"diode_floor must lie in (0, open_resistance), not {diode_floor!r}")
         super().__init__(tol, max_iterations, **options)
         self.options.update(rematch_every=rematch_every, max_rematches=max_rematches, threshold=threshold,
-                            open_resistance=open_resistance, open_alpha=open_alpha)
+                            open_resistance=open_resistance, open_alpha=open_alpha, diode_floor=diode_floor)
 
     def _matching(self, cfg):
         o = self.options
         return _Rematching(cfg, o["rematch_every"], o["max_rematches"], o["threshold"], o["open_resistance"],
-                           o["open_alpha"])
+                           o["open_alpha"], o["diode_floor"])
 
 
 class SpingarnAdaptiveSplitSolver(SpingarnAdaptiveSolver):

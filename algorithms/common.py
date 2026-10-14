@@ -23,20 +23,23 @@ class SolveOutput:
     history: dict = field(default_factory=dict)
 
 
-def kcl_check(cfg, u, reltol, abstol, A=None, x0=None):
+def kcl_check(cfg, u, reltol, abstol, A=None, x0=None, current=None):
     """
     Branch voltages and currents implied by node potentials `u`, and whether they satisfy KCL at every node to SPICE's
     own current tolerance: |sum of currents| <= reltol * (sum of |currents|) + abstol. Currents come from the exact
     branch laws, so the residual measures how far `u` is from a true DC solution. Every solver's answer is judged by
-    this test. A is cfg's incidence matrix, if already built; x0 optionally warm-starts the 1S1R cells' series solve
-    (see Config.current), which makes the test cheaper without changing it.
+    this test. A is cfg's incidence matrix, if already built; x0 optionally warm-starts the cells' series solve (see
+    Config.current), which makes the test cheaper without changing it. current, if given, replaces cfg.current as the
+    branch laws (called as current(v, x0)): SPICE's diode element, for one, is not quite the Shockley law.
     """
     A = cfg.incidence() if A is None else A
     v = A.T @ u
-    i = cfg.current(v, x0)
+    i = (cfg.current if current is None else current)(v, x0)
     residual = np.abs(A @ i)
     scale = abs(A) @ np.abs(i)
-    ok = bool(np.all(residual <= reltol * scale + abstol))
+    # finite first: overflowed currents would pass inf <= reltol * inf (behavioral exp() diodes on 2026-10-14: ngspice
+    # declared convergence at node potentials of 4e71 V, where its exp() clamp makes the diode current flat)
+    ok = bool(np.all(np.isfinite(residual)) and np.all(residual <= reltol * scale + abstol))
     return v, i, ok, float(residual.max()), float(np.max(residual / np.maximum(scale, abstol)))
 
 

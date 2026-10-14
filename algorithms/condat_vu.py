@@ -230,8 +230,9 @@ class CondatVuSolver(Solver):
             raise ValueError("max_iterations must be at least 1")
 
     def solve(self, cfg):
-        if cfg.device not in ("memristor", "1d1r"):
-            raise ValueError(f"condat_vu handles memristor and 1d1r cells only, not {cfg.device!r}")
+        if cfg.device not in ("memristor", "1d1r") or cfg.internal_node:
+            raise ValueError(f"condat_vu handles lumped memristor and 1d1r cells only, not {cfg.device!r}"
+                             + (" with internal nodes" if cfg.internal_node else ""))
         diode = cfg.device == "1d1r"
         abstol = self.options["abstol"]
         history = {}
