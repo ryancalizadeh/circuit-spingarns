@@ -31,6 +31,8 @@ Scaling sweep (2026-10-09, PC, runner, isolated runs, 3 seeds; delta = 0; result
 
 Update 2026-10-14 (laptop): adaptive matching (`spingarn_adaptive`, alpha 1) cuts the ~108 / ~220 sector iterations to 9-16, flat, and beats SPICE 2.4-6.6x at 16-256; see [[adaptive-matching-findings]].
 
+Update 2026-10-14 (laptop, results/best-1s1r-Roff1M, R_off 1M, 16-256): Newton on our CHOLMOD (8-9 its) beats adaptive Spingarn (14-16 its, 6-7 re-matches): 1.12 vs 1.84 s at 256, gap widening (1.45x at 128 -> 1.6x). Both ~6-11x faster than SPICE. The adaptive iteration's series solve (92 ms) costs more than a Newton refactor (67 ms).
+
 **Why:** this was proposed as the model where Newton is disadvantaged. It isn't; a bounded-slope monotone kink is benign for Newton.
 
 **How to apply:** don't claim that nonsmooth monotone devices with bounded slopes favour Spingarn on iteration count; its 1S1R win at >= 512 comes from cheap iterations against SPICE's growing refactorization cost, and the 768 result is a SPICE implementation limit. Newton disadvantages come from exponential growth, near-singular Jacobians or non-monotone laws (see [[todo-sinh-devices]]). Related: [[diode-1d1r-findings]], [[spingarn-solver-findings]].

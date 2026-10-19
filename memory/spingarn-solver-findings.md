@@ -23,6 +23,8 @@ Factorization (2026-10-08, on the laptop of [[measurement-machine]], 3 seeds per
 
 User decisions: register both device matchings as separate solvers (2026-10-05). CHOLMOD + geometric nested dissection becomes the default with SuperLU kept as legacy `spingarn_slu`, cvxopt as the CHOLMOD binding, SPICE left out of the factorization comparison, sizes up to 1024x1024, and `blas_threads=1` (2026-10-08).
 
+Update 2026-10-14 (laptop, results/best-memristor, 16-256, 3 seeds): Newton on the same CHOLMOD+ND factorization needs only 2-3 its on this nearly linear crossbar and ties fixed Spingarn (0.34 vs 0.29 s at 256); both ~16x faster than SPICE. Spingarn's per-iteration time grew 6.8x from 128 to 256 vs ~4x for Newton's refactorizations, so its one-factorization advantage doesn't show yet. See best_comparisons.md.
+
 **Why:** these are the evidence for the size-independence hypothesis in [[project-goals]] and decide how Spingarn vs SPICE comparisons must be read alongside [[ngspice-baseline-findings]].
 
 **How to apply:** compare runtimes at matched accuracy (check both solvers' kcl_residual_rel, align tolerances); say which variant and which factorization a number came from (old "spingarn" numbers are SuperLU); attribute large-size runtime to the per-iteration overhead and the factorization, in that order, for the CHOLMOD default.
