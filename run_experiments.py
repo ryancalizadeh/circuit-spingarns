@@ -60,8 +60,9 @@ def parse_size(text):
 
 
 def run_one(solver, cfg):
-    """Solve cfg with solver, timing only the solve call, and wrap the outcome in a Result."""
-    start = time.perf_counter()
+    """Solve cfg with solver, timing only the solve call, and wrap the outcome in a Result. The history gains cpu_time,
+    the CPU seconds the process spent in the solve (all its threads), which against the runtime shows parallelism."""
+    start, cpu_start = time.perf_counter(), time.process_time()
     try:
         out = solver.solve(cfg)
     except Exception as e:
@@ -69,9 +70,10 @@ def run_one(solver, cfg):
         return Result(cfg, solver.name, ERROR, runtime,
                       error="".join(traceback.format_exception_only(type(e), e)).strip())
     runtime = time.perf_counter() - start
+    history = dict(out.history, cpu_time=time.process_time() - cpu_start)
     status = CONVERGED if out.converged else NOT_CONVERGED
     iterations = out.iterations if out.converged else math.nan
-    return Result(cfg, solver.name, status, runtime, iterations, out.v, out.i, out.history)
+    return Result(cfg, solver.name, status, runtime, iterations, out.v, out.i, history)
 
 
 def peak_memory_bytes():

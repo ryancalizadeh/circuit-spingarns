@@ -9,8 +9,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from Config import Config
 from Config import BranchKind
-from algorithms.spice import (SpiceExpSolver, SpiceSolver, kcl_check, netlist, ngspice, op_method, read_op,
-                              spice_diode_current)
+from algorithms.spice import (SpiceExpSolver, SpiceSolver, fallback_stages, kcl_check, netlist, ngspice, op_method,
+                              read_op, spice_diode_current)
 from run_experiments import run_sweep
 from test_config import solve as newton
 
@@ -227,6 +227,35 @@ def test_op_method_from_ngspice_notes():
                       "Warning: source stepping failed", "Note: Transient op started",
                       "Error: Transient op failed, timestep too small",
                       "Error: The operating point could not be simulated successfully."]) == "failed"
+
+
+def test_fallback_stages_from_ngspice_notes():
+    """Every fallback ngspice tried, in order, with its outcome; notes that are not about a fallback are skipped."""
+    assert fallback_stages([]) == []
+    assert fallback_stages(["Note: Starting dynamic gmin stepping", "Note: Dynamic gmin stepping completed"]) \
+        == [["dynamic gmin stepping", "completed"]]
+    assert fallback_stages(["Warning: singular matrix:  check node 0", "Note: Starting dynamic gmin stepping",
+                            "Warning: Dynamic gmin stepping failed", "Note: Starting true gmin stepping",
+                            "Warning: True gmin stepping failed", "Note: Starting source stepping",
+                            "Warning: source stepping failed", "Note: Transient op started",
+                            "Error: Transient op failed, timestep too small",
+                            "Error: The operating point could not be simulated successfully."]) \
+        == [["dynamic gmin stepping", "failed"], ["true gmin stepping", "failed"], ["source stepping", "failed"],
+            ["transient op", "failed"]]
+    assert fallback_stages(["Note: Starting source stepping", "Note: Source stepping completed"]) \
+        == [["source stepping", "completed"]]
+    assert fallback_stages(["Note: Transient op started", "Note: Transient op finished successfully"]) \
+        == [["transient op", "completed"]]
+
+
+def test_fallbacks_recorded():
+    """A plain Newton solve records no fallback; one forced past Newton (as in test_options_reach_ngspice) records the
+    source stepping that found its operating point."""
+    plain = SpiceSolver().solve(Config(4, 4, seed=0))
+    assert plain.converged and plain.history["fallbacks"] == [] and plain.history["notes_count"] == 0
+    forced = SpiceSolver(gminsteps=0, noopiter=True).solve(Config(4, 4, seed=0))
+    assert forced.converged and forced.history["fallbacks"][-1] == ["source stepping", "completed"], \
+        forced.history["notes"]
 
 
 def test_runs_in_the_experiment_runner():

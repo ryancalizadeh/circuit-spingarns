@@ -171,6 +171,30 @@ def op_method(notes):
     return "newton"
 
 
+def fallback_stages(notes):
+    """
+    The fallbacks ngspice tried for the operating point, in order, from its stderr notes: a list of [stage, outcome]
+    with stage as ngspice names it, lowercased ("dynamic gmin stepping", "true gmin stepping", "source stepping",
+    "transient op", ...) and outcome "completed", "failed" or "started" (no outcome noted). Empty for plain Newton.
+    """
+    stages = []
+    for line in notes:
+        text = re.sub(r"^(note|warning|error):\s*", "", line.strip().lower())
+        start = re.match(r"starting (.+?)\s*$", text) or re.match(r"(transient op) started", text)
+        if start:
+            stages.append([start.group(1), "started"])
+            continue
+        end = re.match(r"(.+?) (completed|failed|finished successfully)", text)
+        if end:
+            stage, outcome = end.group(1), "failed" if end.group(2) == "failed" else "completed"
+            match = next((s for s in reversed(stages) if s[0] == stage and s[1] == "started"), None)
+            if match:
+                match[1] = outcome
+            else:
+                stages.append([stage, outcome])
+    return stages
+
+
 # ngspice `rusage everything` fields recorded in the run history.
 _RUSAGE = {
     "Total iterations": "spice_iterations",
@@ -235,6 +259,10 @@ class SpiceSolver(Solver):
     The test uses the laws ngspice was given (as_solved_current); where those differ from Config's (the diode element,
     the regularized ideal diode), the residual under Config's exact laws is recorded too, as kcl_exact_residual and
     kcl_exact_residual_rel.
+
+    The history records how the operating point was reached: method (op_method) and fallbacks, every fallback ngspice
+    tried with its outcome (fallback_stages), with the first 20 of its notes_count stderr notes. Its iteration count and
+    timings come from ngspice's rusage (see _RUSAGE), which counts fallback iterations too.
     """
     name = "spice"
     default_tol = 1e-3
@@ -286,6 +314,8 @@ class SpiceSolver(Solver):
             solver_lines = [line for line in ng.stdout.splitlines() if "Direct Linear Solver" in line]
             history["linear_solver"] = solver_lines[0] if solver_lines else None
             history["notes"] = notes[:20]
+            history["notes_count"] = len(notes)
+            history["fallbacks"] = fallback_stages(notes)
             history.update(rusage(ng))
             iterations = int(history.get("spice_iterations", 0))
 

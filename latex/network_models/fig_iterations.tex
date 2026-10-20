@@ -1,0 +1,18 @@
+% Iterations vs array size: Spingarn's iterations and SPICE's Newton iterations (fallback stages such as gmin stepping
+% included); medians over 3 seeds. Needs network_models_style.tex; data iterations.csv.
+\begin{tikzpicture}
+\begin{groupplot}[group style={nm group style}, nm axis, ylabel={iterations},
+  ymin=2, ymax=1e4, ytick={1,1e1,1e2,1e3,1e4}]
+\nextgroupplot[title={Memristor}, legend to name=nmIterationsLegend, nm legend]
+  \addplot[nm spice]     table[nm csv, y=mem_spice]  {\NMdata/iterations.csv}; \addlegendentry{SPICE (Newton)}
+  \addplot[nm zero bias] table[nm csv, y=mem_zb]     {\NMdata/iterations.csv}; \addlegendentry{Spingarn, zero-bias $\gamma$}
+  \addplot[nm sector]    table[nm csv, y=mem_sector] {\NMdata/iterations.csv}; \addlegendentry{Spingarn, sector $\gamma$}
+\nextgroupplot[title={1D1R, ideal diode}]
+  \addplot[nm spice]     table[nm csv, y=ideal_spice] {\NMdata/iterations.csv};
+  \addplot[nm zero bias] table[nm csv, y=ideal_zb]    {\NMdata/iterations.csv};
+\nextgroupplot[title={1D1R, Shockley diode}]
+  \addplot[nm spice]     table[nm csv, y=shockley_spice] {\NMdata/iterations.csv};
+  \addplot[nm zero bias] table[nm csv, y=shockley_zb]    {\NMdata/iterations.csv};
+\end{groupplot}
+\node[anchor=south, yshift=2pt] at (group c2r1.outer north) {\pgfplotslegendfromname{nmIterationsLegend}};
+\end{tikzpicture}

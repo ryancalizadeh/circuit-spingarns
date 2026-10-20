@@ -1,0 +1,51 @@
+% Styles for the SPICE vs Spingarn figures fig_runtime.tex, fig_iterations.tex, fig_memory.tex and fig_speedup.tex.
+% Needs \usepackage{pgfplots} and \usepgfplotslibrary{groupplots} (compat 1.18 tested). \input this file once in the
+% preamble, then \input each figure inside a figure environment (preview.tex does both).
+%
+% Data: the CSVs written by `python network_models_latex.py` (repo root), one row per array size N (N x N) and one column
+% per series, with _min, _max and _n (converged runs) beside each median; nan where no run converged, which pgfplots
+% leaves out. Series: mem_{spice,zb,sector} (memristor alone), ideal_{spice,zb} (1D1R, ideal diode on its own branch),
+% shockley_{spice,zb} (1D1R, Shockley diode on its own branch). zb is Spingarn with gamma = R_min on the memristors and,
+% on 1D1R, the diode port sqrt(R_min R_max); sector is gamma = sqrt(R_min R_max) on the memristors.
+%
+% \NMdata is the folder holding the CSVs, relative to the main .tex file; define it before \input-ing this file if the
+% CSVs are elsewhere, e.g. \newcommand\NMdata{figures/network_models}.
+\providecommand\NMdata{.}
+
+% Series colours from the repo's plotting.py (spice slot 1, spingarn slot 0, spingarn_sector slot 2), checked with the
+% dataviz palette validator on white (all pairs pass CVD and normal vision). The teal is below 3:1 against white, so
+% every series also has its own marker.
+\definecolor{nmSpice}{HTML}{EB6834}
+\definecolor{nmZeroBias}{HTML}{2A78D6}
+\definecolor{nmSector}{HTML}{1BAF7A}
+\definecolor{nmInk}{HTML}{52514E}
+\definecolor{nmGrid}{HTML}{E6E5E0}
+
+\pgfplotsset{
+  % table options: \addplot[nm spice] table[nm csv, y=mem_spice] {\NMdata/runtime.csv};
+  table/nm csv/.style={col sep=comma, x=N},
+  nm series/.style={color=#1, line width=1pt, mark options={fill=#1, draw=white, line width=0.4pt, solid}},
+  nm spice/.style={nm series=nmSpice, mark=*, mark size=2pt},
+  nm zero bias/.style={nm series=nmZeroBias, mark=square*, mark size=1.8pt},
+  nm sector/.style={nm series=nmSector, mark=triangle*, mark size=2.4pt},
+  nm reference/.style={draw=nmInk!55, line width=0.6pt, dashed, forget plot},
+  % one panel; width/height are per panel (three panels plus labels fill ~15.5 cm)
+  nm axis/.style={
+    width=5.3cm, height=5cm, scale only axis=false,
+    xmode=log, ymode=log,
+    xtick={16,64,256,1024}, xticklabels={16,64,256,1024}, minor xtick={32,128,512},
+    xmin=12, xmax=1400,
+    yminorticks=false,
+    xlabel={$N$ ($N\times N$ array)},
+    grid=major, major grid style={draw=nmGrid, line width=0.4pt},
+    axis lines=left, axis line style={draw=nmInk!60, -},
+    tick style={draw=nmInk!60}, tick label style={font=\footnotesize, text=nmInk},
+    label style={font=\small, text=nmInk}, title style={font=\small, text=black},
+    unbounded coords=jump,
+  },
+  % the three-panel layout; groupplot reads group style only from its own options, so use it as
+  % \begin{groupplot}[group style={nm group style}, nm axis, ...]
+  group/nm group style/.style={group size=3 by 1, horizontal sep=0.45cm, y descriptions at=edge left},
+  nm legend/.style={legend columns=3, legend style={draw=none, font=\small, text=nmInk,
+    /tikz/every even column/.append style={column sep=0.8em}}},
+}

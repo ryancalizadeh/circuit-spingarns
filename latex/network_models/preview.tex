@@ -1,0 +1,53 @@
+% Preview of the network-models figures on a thesis-width page (15.5 cm text). Compile twice (the shared legends use
+% `legend to name`):  pdflatex preview && pdflatex preview
+% In a LaTeX project: copy this folder, \input{network_models_style} in the preamble (after pgfplots and groupplots;
+% define \NMdata first if the CSVs are not next to the main file), and \input{fig_...} inside a figure environment.
+\documentclass[11pt]{article}
+\usepackage[a4paper, textwidth=15.5cm, top=2cm, bottom=2cm]{geometry}
+\usepackage{pgfplots}
+\usepgfplotslibrary{groupplots}
+\pgfplotsset{compat=1.18}
+\input{network_models_style}
+
+\begin{document}
+
+\begin{figure}[p]
+  \centering
+  \input{fig_runtime}
+  \caption{Runtime against array size for SPICE (ngspice-47, KLU) and Spingarn with fixed port resistances
+  ($\alpha = 1$ on the memristor, $0.8$ on 1D1R; CHOLMOD with AMD ordering), median over three random circuits.
+  Zero-bias $\gamma$: $\gamma = R_{\min}$ per memristor; sector $\gamma$: $\sqrt{R_{\min}R_{\max}}$. On 1D1R the diode
+  is on its own branch with port resistance $\sqrt{R_{\min}R_{\max}}$. SPICE writes the ideal diode as
+  $\mathrm{uramp}(V)/1\,\mathrm{m\Omega}$ and the Shockley diode ($I_s = 10^{-9}$\,A, $n = 1$) as a behavioural
+  $\exp$ source; on that case every SPICE run needed gmin stepping, and its $512\times512$ point is a single run.
+  SPICE was not run at $1024\times1024$, where ngspice's KLU fails.}
+\end{figure}
+
+\begin{figure}[p]
+  \centering
+  \input{fig_speedup}
+  \caption{SPICE's runtime divided by Spingarn's, from the medians of the runtime figure.}
+\end{figure}
+
+\begin{figure}[p]
+  \centering
+  \input{fig_iterations}
+  \caption{Iterations: Spingarn's, and SPICE's Newton iterations including fallback stages (gmin stepping).}
+\end{figure}
+
+\begin{figure}[p]
+  \centering
+  \input{fig_per_iteration}
+  \caption{Time per iteration, one-time costs (netlist load and KLU reordering; Spingarn's assembly and
+  factorization) excluded. On the memristor the two Spingarn variants coincide: they factorize the same matrix
+  and do the same work per iteration.}
+\end{figure}
+
+\begin{figure}[p]
+  \centering
+  \input{fig_memory}
+  \caption{Peak memory of the process each run executed in. On the memristor the two Spingarn variants
+  coincide.}
+\end{figure}
+
+\end{document}

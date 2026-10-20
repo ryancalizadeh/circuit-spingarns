@@ -456,6 +456,7 @@ def test_diode_resolvent_and_port_resistances():
         assert np.all(port_resistances(cfg, "r_lo", 30.0)[e] == 30.0)
         assert np.array_equal(port_resistances(cfg, "r_lo")[cfg.slices[BranchKind.DEVICE]], cfg.R_min_cell)
     assert np.allclose(diode_port_resistances(shockley, "zero_bias"), 1.5 * 0.02585 / 1e-9)
+    assert np.allclose(diode_port_resistances(ideal, "geometric"), np.sqrt(ideal.R_min_cell * ideal.R_max_cell))
     try:
         diode_port_resistances(ideal, "zero_bias")
         assert False, "zero-bias matching of an ideal diode accepted"

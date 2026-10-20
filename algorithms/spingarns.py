@@ -58,7 +58,7 @@ from algorithms.common import Solver, SolveOutput, kcl_check
 from algorithms.ordering import nested_dissection
 
 GAMMA_RULES = ("geometric", "r_lo")
-DIODE_GAMMA_RULES = ("r_min", "zero_bias")
+DIODE_GAMMA_RULES = ("r_min", "geometric", "zero_bias")
 FACTORIZATIONS = ("cholmod", "slu")
 # "builtin" leaves the ordering to the factorization library: minimum degree on A + A^T for SuperLU, and CHOLMOD's default
 # strategy, which is AMD in cvxopt's build (compiled without METIS, so CHOLMOD has no nested dissection of its own).
@@ -97,6 +97,7 @@ def diode_port_resistances(cfg, rule):
     Port resistances of the pq diodes on branches of their own (Config's internal_node), by `rule`:
 
         "r_min"      the cell's memristor R_min, so diode and memristor start alike;
+        "geometric"  the cell's memristor sqrt(R_min R_max), the memristor's own "geometric" port;
         "zero_bias"  the Shockley diode's zero-bias incremental resistance n V_T / I_s (not defined for the ideal diode);
         a number     that resistance in ohms, for every diode.
 
@@ -104,6 +105,8 @@ def diode_port_resistances(cfg, rule):
     """
     if rule == "r_min":
         return cfg.R_min_cell.copy()
+    if rule == "geometric":
+        return np.sqrt(cfg.R_min_cell * cfg.R_max_cell)
     if rule == "zero_bias":
         if cfg.diode_law != "shockley":
             raise ValueError("diode_gamma='zero_bias' needs Shockley diodes; an ideal diode's is 0 or inf")
@@ -278,7 +281,8 @@ def factorize(K, factorization, perm=None):
     Returns solve, which maps a right-hand side to the solution of K x = rhs, and a dict describing the factorization:
     ordering_used ("mmd", "nested_dissection" or CHOLMOD's own choice) and factor_nnz, the entries the factorization
     stores (L and U for SuperLU, L with its supernodal padding for CHOLMOD); for CHOLMOD also cholmod_ordering and lnz
-    (see cholmod_factor_stats).
+    (see cholmod_factor_stats), and the seconds spent in its symbolic analysis (which includes CHOLMOD's own ordering) and
+    numeric factorization, symbolic_time and numeric_time.
 
     solve.refactor(K2) replaces the factorization by one of K2, which must have K's sparsity pattern (as A Gamma^-1 A^T
     has for every positive Gamma), in the same ordering. CHOLMOD keeps its symbolic analysis and redoes only the numeric
@@ -314,12 +318,15 @@ def factorize(K, factorization, perm=None):
     saved = dict(cholmod.options)
     cholmod.options["nmethods"] = 0 if perm is None else 1
     try:
+        t = time.perf_counter()
         F = cholmod.symbolic(Kc, uplo="L", **({} if perm is None else {"p": cvxopt.matrix(perm)}))
+        t_numeric = time.perf_counter()
         cholmod.numeric(Kc, F)
+        done = time.perf_counter()
     finally:
         cholmod.options.clear()
         cholmod.options.update(saved)
-    info = dict(ordering_used=None, factor_nnz=None)
+    info = dict(ordering_used=None, factor_nnz=None, symbolic_time=t_numeric - t, numeric_time=done - t_numeric)
     info.update(cholmod_factor_stats(F, n))
     info["ordering_used"] = "nested_dissection" if perm is not None else info.get("cholmod_ordering", "cholmod_default")
     B = cvxopt.matrix(0.0, (n, 1))
@@ -361,6 +368,12 @@ class SpingarnSolver(Solver):
     the limit, both to relative tolerance tol: KCL by SPICE's own test (kcl_check) on the node potentials u of v, which
     the projection yields at no extra solve, and KVL by max |v - A^T u| <= tol * max |v|. A converged answer thus passes
     the same KCL test as SPICE's. Iterations count passes of the loop, i.e. linear solves.
+
+    The history profiles the solve. One-time costs: setup_time, split into assembly_time (incidence matrix, port
+    resistances, A Gamma^-1 A^T), ordering_time (the geometric ordering; CHOLMOD's own is inside symbolic_time) and
+    factor_time (for CHOLMOD symbolic_time + numeric_time). Iterations: iteration_time, split into resolvent_time (the
+    branches' scattering), network_time (the network's, which includes triangular_solve_time, CHOLMOD's solves alone),
+    check_time (the KCL and KVL test) and update_time (the relaxation), plus refactor_time for re-matches.
     """
     name = "spingarn"
     default_gamma = "r_lo"
@@ -409,6 +422,7 @@ class SpingarnSolver(Solver):
         AT = A.T.tocsr()
         gamma = port_resistances(cfg, self.options["gamma"], self.options["diode_gamma"])
         K = A @ sp.diags(1 / gamma) @ AT
+        assembly_time = time.perf_counter() - t
         perm, ordering_time = None, 0.0
         if self.options["ordering"] == "nested_dissection":
             t_order = time.perf_counter()
@@ -417,8 +431,8 @@ class SpingarnSolver(Solver):
         t_factor = time.perf_counter()
         solve_K, factor_info = factorize(K, self.options["factorization"], perm)
         done = time.perf_counter()
-        history.update(setup_time=done - t, ordering_time=ordering_time, factor_time=done - t_factor,
-                       blas_threads=threads, **factor_info)
+        history.update(setup_time=done - t, assembly_time=assembly_time, ordering_time=ordering_time,
+                       factor_time=done - t_factor, blas_threads=threads, **factor_info)
         history["contraction_bound"] = contraction_bound(cfg, gamma, alpha)
 
         d = cfg.slices[BranchKind.DEVICE]
@@ -436,9 +450,13 @@ class SpingarnSolver(Solver):
         w = np.zeros(cfg.num_nodes)  # node potentials of M a
         v = np.zeros(cfg.num_branches)
         kcl, kvl, fixed_point, newton_steps, refactor_time = [], [], [], 0, 0.0
+        # seconds per phase of the iteration, summed over iterations (refactor_time holds the re-matches)
+        profile = dict.fromkeys(("resolvent_time", "network_time", "triangular_solve_time", "check_time",
+                                 "update_time"), 0.0)
         converged = False
         t = time.perf_counter()
         for k in range(self.max_iterations):
+            t_phase = time.perf_counter()
             # 1) scattering at the branches
             v_dev, steps, warm = cell_resolvent(cfg, a[d], gamma[d], warm)
             newton_steps += steps
@@ -448,6 +466,7 @@ class SpingarnSolver(Solver):
                 v[e] = diode_resolvent(cfg, a[e], gamma[e])
             b = 2 * v - a
             i = (a - b) / (2 * gamma)
+            profile["resolvent_time"] += time.perf_counter() - t_phase
 
             # adaptive matching: new port resistances for the cells (and diodes), in place, the same branch point (v, i)
             # in the new waves. Only those change, so the linear branches' maps stay as they are.
@@ -463,10 +482,16 @@ class SpingarnSolver(Solver):
                 refactor_time += time.perf_counter() - t_refactor
 
             # 2) scattering at the network: M b = A^T u_b
-            u_b = solve_K(A @ (b * weight))
+            t_phase = time.perf_counter()
+            rhs = A @ (b * weight)
+            t_solve = time.perf_counter()
+            u_b = solve_K(rhs)
+            profile["triangular_solve_time"] += time.perf_counter() - t_solve
             Sb = 2 * (AT @ u_b) - b
             r = Sb - a
             fixed_point.append(float(np.sqrt((r * r) @ weight / max((a * a) @ weight, (Sb * Sb) @ weight, 1e-300))))
+            t_check = time.perf_counter()
+            profile["network_time"] += t_check - t_phase
 
             # (v, i) against KCL and KVL, through the node potentials u of M v = (M a + M b) / 2
             u = (w + u_b) / 2
@@ -475,6 +500,8 @@ class SpingarnSolver(Solver):
             v_max, kvl_abs = np.abs(v).max(), np.abs(v - v_u).max()
             kcl.append(kcl_rel)
             kvl.append(float(kvl_abs / v_max) if v_max > 0 else 0.0)
+            t_phase = time.perf_counter()
+            profile["check_time"] += t_phase - t_check
             if kcl_ok and kvl_abs <= self.tol * v_max:
                 converged = True
                 break
@@ -484,7 +511,9 @@ class SpingarnSolver(Solver):
                 w = (1 - relax) * w + relax * u_b
             else:  # M a no longer follows from M a and M b: one more solve
                 w = solve_K(A @ (a * weight))
+            profile["update_time"] += time.perf_counter() - t_phase
         history["iteration_time"] = time.perf_counter() - t
+        history.update(profile)
         history.update(kcl_residual=kcl_abs, kcl_residual_rel=kcl_rel, kvl_residual_rel=kvl[-1],
                        newton_steps=newton_steps, kcl_history=kcl, kvl_history=kvl, fixed_point_history=fixed_point)
         if matching is not None:
