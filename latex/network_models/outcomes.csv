@@ -1,0 +1,8 @@
+N,mem_spice_converged,mem_spice_timeout,mem_spice_failed,mem_spice_skipped,mem_zb_converged,mem_zb_timeout,mem_zb_failed,mem_zb_skipped,ideal_spice_converged,ideal_spice_timeout,ideal_spice_failed,ideal_spice_skipped,ideal_zb_converged,ideal_zb_timeout,ideal_zb_failed,ideal_zb_skipped,shockley_spice_converged,shockley_spice_timeout,shockley_spice_failed,shockley_spice_skipped,shockley_zb_converged,shockley_zb_timeout,shockley_zb_failed,shockley_zb_skipped
+16,10,0,0,0,10,0,0,0,10,0,0,0,10,0,0,0,10,0,0,0,10,0,0,0
+32,10,0,0,0,10,0,0,0,10,0,0,0,10,0,0,0,10,0,0,0,10,0,0,0
+64,10,0,0,0,10,0,0,0,10,0,0,0,10,0,0,0,10,0,0,0,10,0,0,0
+128,10,0,0,0,10,0,0,0,10,0,0,0,10,0,0,0,9,0,1,0,10,0,0,0
+256,10,0,0,0,10,0,0,0,10,0,0,0,10,0,0,0,10,0,0,0,10,0,0,0
+512,10,0,0,0,10,0,0,0,10,0,0,0,10,0,0,0,0,1,0,9,10,0,0,0
+1024,0,0,0,10,10,0,0,0,0,0,0,10,10,0,0,0,0,0,0,10,10,0,0,0

@@ -59,9 +59,12 @@ def parse_size(text):
     return int(p), int(q or p)
 
 
-def run_one(solver, cfg):
+def run_one(solver, cfg, on_start=None):
     """Solve cfg with solver, timing only the solve call, and wrap the outcome in a Result. The history gains cpu_time,
-    the CPU seconds the process spent in the solve (all its threads), which against the runtime shows parallelism."""
+    the CPU seconds the process spent in the solve (all its threads), which against the runtime shows parallelism.
+    on_start, if given, is called just before the clock starts (run_isolated's runtime cap starts from it)."""
+    if on_start:
+        on_start()
     start, cpu_start = time.perf_counter(), time.process_time()
     try:
         out = solver.solve(cfg)
@@ -125,13 +128,14 @@ def save_pickle(res, path):
     tmp.replace(path)
 
 
-def solve_and_save(solver, p, q, seed, circuit, pickle_path, report=None, measure_memory=False):
+def solve_and_save(solver, p, q, seed, circuit, pickle_path, report=None, measure_memory=False, on_start=None):
     """
     Generate the circuit, solve it, and return the run summary. The summary goes to `report` (if given) before the
     full Result is pickled to `pickle_path` (if set), so a failure while pickling cannot lose the measurement.
     measure_memory adds the process's peak memory to the summary; it is only meaningful in a process of its own.
+    on_start goes to run_one.
     """
-    res = run_one(solver, Config(p, q, seed=seed, **circuit))
+    res = run_one(solver, Config(p, q, seed=seed, **circuit), on_start)
     summary = res.summary()
     summary["peak_memory"] = peak_memory_bytes() if measure_memory else None
     if report:
@@ -141,9 +145,13 @@ def solve_and_save(solver, p, q, seed, circuit, pickle_path, report=None, measur
     return summary
 
 
+SOLVE_STARTED = "solve started"  # what an isolated run sends just before its timed solve, ahead of its summary
+
+
 def _isolated_run(conn, solver, p, q, seed, circuit, pickle_path):
     warm_up(solver, circuit)
-    solve_and_save(solver, p, q, seed, circuit, pickle_path, report=conn.send, measure_memory=True)
+    solve_and_save(solver, p, q, seed, circuit, pickle_path, report=conn.send, measure_memory=True,
+                   on_start=lambda: conn.send(SOLVE_STARTED))
     conn.close()
 
 
@@ -155,11 +163,13 @@ def failure_summary(solver, p, q, seed, circuit, status, error, wall_time):
                 error=error, history=dict(wall_time=wall_time), config=params, peak_memory=None)
 
 
-def run_isolated(solver, p, q, seed, circuit, pickle_path, timeout=None):
+def run_isolated(solver, p, q, seed, circuit, pickle_path, timeout=None, runtime_cap=None):
     """
     solve_and_save in a fresh process. If the process dies before reporting (out of memory, a native crash) the run is
-    recorded as CRASHED; if it is still running after `timeout` seconds (process start-up included) it is killed and
-    recorded as TIMEOUT. Only the small summary crosses back; the circuit is generated and pickled in the child.
+    recorded as CRASHED; if it is still running after `timeout` seconds (process start-up included), or `runtime_cap`
+    seconds after its timed solve started (start-up, warm-up and circuit generation excluded, so the cap bounds the
+    recorded runtime), it is killed and recorded as TIMEOUT, the cap's with history["runtime_cap"] set. Only the small
+    summary crosses back; the circuit is generated and pickled in the child.
     """
     ctx = multiprocessing.get_context("spawn")
     receiver, sender = ctx.Pipe(duplex=False)
@@ -167,12 +177,18 @@ def run_isolated(solver, p, q, seed, circuit, pickle_path, timeout=None):
     start = time.perf_counter()
     proc.start()
     sender.close()  # the child holds the only write end now, so its death shows up as EOF here
+    capped = False
     try:
-        if receiver.poll(timeout):
-            summary = receiver.recv()
+        message = receiver.recv() if receiver.poll(timeout) else None
+        if message == SOLVE_STARTED:
+            left = None if timeout is None else max(0.0, timeout - (time.perf_counter() - start))
+            capped = runtime_cap is not None and (left is None or runtime_cap < left)
+            message = receiver.recv() if receiver.poll(runtime_cap if capped else left) else None
+        if message is not None:
             proc.join()  # the child pickles the full Result after reporting; wait for it
-            return summary
-        status, error = TIMEOUT, f"no result after {timeout} s"
+            return message
+        status, error = TIMEOUT, (f"runtime cap: no result {runtime_cap:g} s into the solve" if capped
+                                  else f"no result after {timeout} s")
     except EOFError:
         proc.join()
         status, error = CRASHED, f"solver process exited with code {proc.exitcode} ({proc.exitcode & 0xFFFFFFFF:#x})"
@@ -181,7 +197,10 @@ def run_isolated(solver, p, q, seed, circuit, pickle_path, timeout=None):
             proc.kill()
         proc.join()
         receiver.close()
-    return failure_summary(solver, p, q, seed, circuit, status, error, time.perf_counter() - start)
+    summary = failure_summary(solver, p, q, seed, circuit, status, error, time.perf_counter() - start)
+    if capped:
+        summary["history"]["runtime_cap"] = runtime_cap
+    return summary
 
 
 def git_commit():

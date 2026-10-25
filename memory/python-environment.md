@@ -17,6 +17,8 @@ The dataviz skill ships a Python twin of its palette validator (`scripts/validat
 
 Scripts that print Greek letters or other non-cp1252 text (e.g. adaptive_matching_figures.py's tables) need `python -X utf8` on Windows, or they raise UnicodeEncodeError on the console. README.md is UTF-16 LE with a BOM and CRLF line endings: edit it by decoding/encoding with Python's 'utf-16', not with plain text tools (2026-10-14).
 
+Bash-tool trap (2026-10-24): never combine `python - <<'EOF'` with `</dev/null` on the same command. The later redirect wins, Python gets an empty stdin that looks like a console, and Python 3.14's REPL loops forever on "OSError: [WinError 6] The handle is invalid" (64 MB of output before it was killed). Write the script to a file in the scratchpad and run that with `</dev/null`. Also, escaped backslashes (`\\begin`) in sed or a heredoc'd Python string did not survive the Bash tool reliably; use the Edit tool for LaTeX source.
+
 **Why:** finding a working interpreter cost a full search in the 2026-10-06 session, and finding a CHOLMOD binding that installs on Windows/Python 3.14 another in 2026-10-08.
 
 **How to apply:** use the venv directly. SPICE runs work on both machines now; still compare runtimes only within one machine (see [[measurement-machine]]). If a fresh venv ever lacks ngspice, repeat the DLL recipe above (README "SPICE setup").

@@ -14,7 +14,7 @@ Measured 2026-10-19 on the PC (see [[measurement-machine]]), `network_models_exp
 - **Agreement** Spingarn vs spice_exp (same exact law): <= 3.8e-10 V to 64, 7.3e-8 at 256, 2.8e-7 at 512; 7.8e-6 at 128 comes from spice_exp seed 0 stopping gmin stepping loosely (KCL rel 3.3e-5, passes RELTOL 1e-3), not from Spingarn.
 - D element runs (16-256, 3 seeds; solver "spice" in the same folder, left out of the CSVs at the user's request): plain Newton 14-18 its except gmin stepping on seed 0 at 16/32; 16 s and 1.06 GB at 256, i.e. ~19x faster than spice_exp; 1.3e-7 V from Spingarn at 128 (not the exact law).
 
-Deliverable: latex/network_models/ (CSV per metric + pgfplots figures, `python network_models_latex.py` regenerates the CSVs; see [[report-format]]).
+Deliverable: was latex/network_models/; since 2026-10-25 that folder holds the 10-seed rerun instead ([[network-models-10seeds-findings]]), which reproduces these numbers.
 
 **Why:** completes the user's three-model SPICE vs Spingarn comparison (memristor / ideal / Shockley, separate branches) to 1024.
 

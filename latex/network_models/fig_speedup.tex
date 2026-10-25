@@ -1,22 +1,25 @@
-% SPICE's runtime over Spingarn's (> 1: Spingarn faster), from the medians in runtime.csv; only where SPICE has data.
-% Needs network_models_style.tex.
+% SPICE's runtime over Spingarn's (> 1: Spingarn faster), from the medians in runtime.csv; only where SPICE was run.
+% Where SPICE timed out, an open triangle marks the lower bound cap / Spingarn's median. Needs network_models_style.tex.
 \begin{tikzpicture}
 \begin{groupplot}[group style={nm group style}, nm axis, ylabel={SPICE runtime / Spingarn runtime},
-  xmax=700, ymin=0.2, ymax=60, ytick={0.25,0.5,1,2,4,8,16,32}, yticklabels={0.25,0.5,1,2,4,8,16,32}]
+  xmax=700, ymin=0.25, ymax=100, ytick={0.25,0.5,1,2,4,8,16,32,64},
+  yticklabels={0.25,0.5,1,2,4,8,16,32,64}]
 \nextgroupplot[title={Memristor}, legend to name=nmSpeedupLegend, nm legend]
   \addplot[nm reference, domain=12:700, samples=2] {1};
-  \addplot[nm zero bias] table[nm csv, y expr=\thisrow{mem_spice}/\thisrow{mem_zb}]     {\NMdata/runtime.csv};
+  \addplot[nm zero bias] table[nm csv, y expr=\thisrow{mem_spice}/\thisrow{mem_zb}] {\NMdata/runtime.csv};
     \addlegendentry{Spingarn, zero-bias $\gamma$}
-  \addplot[nm sector]    table[nm csv, y expr=\thisrow{mem_spice}/\thisrow{mem_sector}] {\NMdata/runtime.csv};
-    \addlegendentry{Spingarn, sector $\gamma$}
+  \addlegendimage{nm bound}\addlegendentry{lower bound (SPICE over the \NMcap\,s cap)}
+  \addplot[nm bound, forget plot] table[nm csv, y expr=\thisrow{mem_spice_capped}/\thisrow{mem_zb}] {\NMdata/runtime.csv};
   \node[font=\scriptsize, text=nmInk, anchor=north west] at (rel axis cs:0.03,0.97) {Spingarn faster $\uparrow$};
   \node[font=\scriptsize, text=nmInk, anchor=south west] at (rel axis cs:0.03,0.03) {SPICE faster $\downarrow$};
 \nextgroupplot[title={1D1R, ideal diode}]
   \addplot[nm reference, domain=12:700, samples=2] {1};
   \addplot[nm zero bias] table[nm csv, y expr=\thisrow{ideal_spice}/\thisrow{ideal_zb}] {\NMdata/runtime.csv};
+  \addplot[nm bound] table[nm csv, y expr=\thisrow{ideal_spice_capped}/\thisrow{ideal_zb}] {\NMdata/runtime.csv};
 \nextgroupplot[title={1D1R, Shockley diode}]
   \addplot[nm reference, domain=12:700, samples=2] {1};
   \addplot[nm zero bias] table[nm csv, y expr=\thisrow{shockley_spice}/\thisrow{shockley_zb}] {\NMdata/runtime.csv};
+  \addplot[nm bound] table[nm csv, y expr=\thisrow{shockley_spice_capped}/\thisrow{shockley_zb}] {\NMdata/runtime.csv};
 \end{groupplot}
 \node[anchor=south, yshift=2pt] at (group c2r1.outer north) {\pgfplotslegendfromname{nmSpeedupLegend}};
 \end{tikzpicture}

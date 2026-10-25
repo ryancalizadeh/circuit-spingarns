@@ -1,0 +1,19 @@
+% Median runtime (s) over 10 seeds, the PC (DESKTOP-EFQTE92); written by network_models_latex.py.
+% ratio = SPICE / Spingarn (> 1: Spingarn faster). Superscript k/m: only k of m runs attempted converged (the
+% median counts timed-out runs as above the 1600 s cap and leaves other failures out). >1600 s: half or
+% more of the runs hit the cap; --: not run (SPICE at 1024: ngspice's KLU size limit). Needs booktabs.
+\begin{tabular}{rrrrrrrrrr}
+\toprule
+ & \multicolumn{3}{c}{Memristor} & \multicolumn{3}{c}{1D1R, ideal diode} & \multicolumn{3}{c}{1D1R, Shockley diode} \\
+\cmidrule(lr){2-4}\cmidrule(lr){5-7}\cmidrule(lr){8-10}
+$N$ & SPICE & Spingarn & ratio & SPICE & Spingarn & ratio & SPICE & Spingarn & ratio \\
+\midrule
+16 & 0.0239 & 0.00619 & 3.9 & 0.0260 & 0.0278 & 0.9 & 0.0479 & 0.0344 & 1.4 \\
+32 & 0.0620 & 0.0104 & 6.0 & 0.0780 & 0.0623 & 1.3 & 0.180 & 0.0719 & 2.5 \\
+64 & 0.212 & 0.0405 & 5.2 & 0.328 & 0.256 & 1.3 & 1.47 & 0.329 & 4.5 \\
+128 & 0.984 & 0.156 & 6.3 & 1.87 & 1.12 & 1.7 & 21.6\textsuperscript{9/10} & 1.16 & 18.6 \\
+256 & 5.39 & 0.775 & 7.0 & 23.5 & 7.52 & 3.1 & 284 & 8.16 & 34.8 \\
+512 & 44.2 & 3.69 & 12.0 & 279 & 90.6 & 3.1 & $>$1600 & 110 & $>$14.6 \\
+1024 & -- & 15.9 & -- & -- & 1169 & -- & -- & 1445 & -- \\
+\bottomrule
+\end{tabular}

@@ -1,8 +1,8 @@
-N,mem_spice,mem_spice_min,mem_spice_max,mem_spice_n,mem_zb,mem_zb_min,mem_zb_max,mem_zb_n,mem_sector,mem_sector_min,mem_sector_max,mem_sector_n,ideal_spice,ideal_spice_min,ideal_spice_max,ideal_spice_n,ideal_zb,ideal_zb_min,ideal_zb_max,ideal_zb_n,shockley_spice,shockley_spice_min,shockley_spice_max,shockley_spice_n,shockley_zb,shockley_zb_min,shockley_zb_max,shockley_zb_n
-16,5,5,5,3,21,17,22,3,97,94,104,3,8,8,8,3,113,112,126,3,153,99,159,3,109,99,128,3
-32,5,5,5,3,17,17,21,3,109,108,113,3,8,8,8,3,124,120,136,3,81,78,83,3,122,113,125,3
-64,5,5,5,3,18,17,19,3,115,113,115,3,9,9,9,3,130,129,141,3,78,78,79,3,114,108,114,3
-128,5,5,5,3,20,20,20,3,115,115,116,3,11,11,11,3,129,126,129,3,87,86,90,3,107,103,115,3
-256,5,5,5,3,20,19,21,3,117,116,117,3,13,12,13,3,170,166,171,3,88,88,89,3,160,154,165,3
-512,5,5,5,3,21,19,21,3,117,117,119,3,17,16,18,3,519,470,533,3,96,96,96,1,494,472,496,3
-1024,nan,nan,nan,0,21,21,21,3,119,119,120,3,nan,nan,nan,0,1597,1595,1607,3,nan,nan,nan,0,1616,1579,1628,3
+N,mem_spice,mem_spice_min,mem_spice_max,mem_spice_n,mem_spice_runs,mem_spice_timeout,mem_spice_capped,mem_zb,mem_zb_min,mem_zb_max,mem_zb_n,mem_zb_runs,mem_zb_timeout,mem_zb_capped,ideal_spice,ideal_spice_min,ideal_spice_max,ideal_spice_n,ideal_spice_runs,ideal_spice_timeout,ideal_spice_capped,ideal_zb,ideal_zb_min,ideal_zb_max,ideal_zb_n,ideal_zb_runs,ideal_zb_timeout,ideal_zb_capped,shockley_spice,shockley_spice_min,shockley_spice_max,shockley_spice_n,shockley_spice_runs,shockley_spice_timeout,shockley_spice_capped,shockley_zb,shockley_zb_min,shockley_zb_max,shockley_zb_n,shockley_zb_runs,shockley_zb_timeout,shockley_zb_capped
+16,5,5,5,10,10,0,nan,22,17,31,10,10,0,nan,8,7,136,10,10,0,nan,113,92,126,10,10,0,nan,94.5,64,164,10,10,0,nan,110.5,94,128,10,10,0,nan
+32,5,5,5,10,10,0,nan,20.5,17,22,10,10,0,nan,8,7,8,10,10,0,nan,124,111,136,10,10,0,nan,82,78,84,10,10,0,nan,114,107,125,10,10,0,nan
+64,5,5,5,10,10,0,nan,19,17,21,10,10,0,nan,9,8,9,10,10,0,nan,130.5,124,141,10,10,0,nan,78.5,77,79,10,10,0,nan,115,108,129,10,10,0,nan
+128,5,5,5,10,10,0,nan,20,17,21,10,10,0,nan,10,10,11,10,10,0,nan,129,126,133,10,10,0,nan,88,86,90,9,10,0,nan,115,103,118,10,10,0,nan
+256,5,5,5,10,10,0,nan,19.5,18,21,10,10,0,nan,12.5,12,13,10,10,0,nan,170.5,166,176,10,10,0,nan,88.5,88,90,10,10,0,nan,158,154,165,10,10,0,nan
+512,5,5,5,10,10,0,nan,20,19,22,10,10,0,nan,16.5,16,18,10,10,0,nan,496,470,533,10,10,0,nan,nan,nan,nan,0,1,1,1600,485.5,472,503,10,10,0,nan
+1024,nan,nan,nan,0,0,0,nan,20.5,20,21,10,10,0,nan,nan,nan,nan,0,0,0,nan,1596,1567,1688,10,10,0,nan,nan,nan,nan,0,0,0,nan,1609.5,1579,1653,10,10,0,nan

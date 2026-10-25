@@ -37,8 +37,16 @@ and all larger sizes of that case are skipped and listed in skipped.jsonl. --spi
 --runtime-limit-at skips, at a size, every solver and case whose runtime extrapolated from the two largest smaller sizes
 exceeds a limit (the user's rule for 1024x1024, 2026-10-19: skip what would take over an hour).
 
+--runtime-cap kills a run that is still solving that many seconds into its timed solve and records it as a timeout,
+"failed to converge within the time limit" (the user's rule of 2026-10-24: 1600 s); a run that converged only after the
+cap is recorded the same way (status timeout, history["converged_after"]). A timeout ends the solver's sweep of the case
+at larger sizes only: its other seeds at that size still run, since they may finish under the cap, unless the solver is
+named in --skip-seeds-after-timeout (all solvers if it is given without names).
+
     python network_models_experiment.py sweep --sizes 16 32 64 128 256 512 1024 --seeds 3 --spice-max-size 512 \
         --runtime-limit-at 1024=3600
+    python network_models_experiment.py sweep --sizes 16 32 64 128 256 512 1024 --seeds 10 --spice-max-size 512 \
+        --runtime-cap 1600 --cases memristor --algorithms spice spingarn_zero_bias
     python network_models_experiment.py sweep --out results/network-models --resume
     python network_models_experiment.py summarize results/network-models
     python network_models_experiment.py export results/network-models    # runtime.csv, runs.csv (e.g. for pgfplots)
@@ -172,6 +180,8 @@ def klu_size_limit(summary):
 def failure_reason(summary):
     """Why this run ends its solver's sweep of the case (see the module docstring), or None if it doesn't."""
     status = summary["status"]
+    if status == TIMEOUT and (summary.get("history") or {}).get("runtime_cap") is not None:
+        return f"over the {summary['history']['runtime_cap']:g} s runtime cap"
     if status in (CRASHED, TIMEOUT):
         return status
     if is_spice(summary["algorithm"]):
@@ -248,18 +258,24 @@ def sweep(args):
         limits = {tuple(json.loads(k)): v for k, v in spec["runtime_limit_at"].items()}
         cases, seeds, timeout = spec["cases"], spec["seeds"], spec["timeout"]
         spice_max, skip, max_iterations = spec["spice_max_size"], spec["skip_after_failure"], spec["max_iterations"]
+        runtime_cap = spec.get("runtime_cap")
+        skip_seeds_after_timeout = spec.get("skip_seeds_after_timeout", True)  # older sweeps skipped them
         diode_gamma, algorithms = spec.get("diode_gamma", "r_min"), spec.get("algorithms", list(DEFAULT_ALGORITHMS))
         reference_dir = spec.get("reference_dir")
     else:
         sizes, seeds_at, limits, cases = args.sizes, dict(args.seeds_at), dict(args.runtime_limit_at), args.cases
         seeds, timeout, spice_max, skip = args.seeds, args.timeout, args.spice_max_size, not args.no_skip
         max_iterations, diode_gamma, algorithms = args.max_iterations, args.diode_gamma, args.algorithms
+        runtime_cap = args.runtime_cap
+        skip_seeds_after_timeout = (False if args.skip_seeds_after_timeout is None else
+                                    args.skip_seeds_after_timeout or True)
         reference_dir = None if args.reference_dir is None else str(args.reference_dir)
         spec = dict(started=datetime.now().isoformat(timespec="seconds"), machine=platform.node(),
                     processor=platform.processor(), cpu_count=os.cpu_count(), sizes=[list(s) for s in sizes],
                     seeds=seeds, seeds_at={json.dumps(list(k)): v for k, v in seeds_at.items()},
                     runtime_limit_at={json.dumps(list(k)): v for k, v in limits.items()}, cases=cases,
-                    timeout=timeout, spice_max_size=spice_max, skip_after_failure=skip, max_iterations=max_iterations,
+                    timeout=timeout, runtime_cap=runtime_cap, skip_seeds_after_timeout=skip_seeds_after_timeout,
+                    spice_max_size=spice_max, skip_after_failure=skip, max_iterations=max_iterations,
                     diode_gamma=diode_gamma, algorithms=algorithms, reference_dir=reference_dir,
                     circuits={case: CASES[case] for case in cases},
                     solvers={case: [s.describe() for s in solvers(case, max_iterations, diode_gamma, algorithms)]
@@ -267,14 +283,19 @@ def sweep(args):
                     git_commit=git_commit())
     spec_path.write_text(json.dumps(spec, indent=2))
 
+    def ends_size(r):
+        """Whether r's failure also skips its solver's other seeds at r's size (see the module docstring)."""
+        policy = skip_seeds_after_timeout
+        return r["status"] != TIMEOUT or policy is True or (isinstance(policy, list) and r["algorithm"] in policy)
+
     done = {(r["case"], r["algorithm"], r["p"], r["q"], r["seed"]) for r in records}
     skipped_before = ({tuple(s[k] for k in ("case", "algorithm", "p", "q", "seed"))
                        for s in map(json.loads, open(skipped_path)) if s} if skipped_path.exists() else set())
-    dead = {}  # (case, solver) -> (cells, reason): the solver's sweep of that case ended at that size
+    dead = {}  # (case, solver) -> (cells, reason, same size): the solver's sweep of that case ended at that size
     for r in records:
         reason = failure_reason(r)
         if skip and reason and (r["case"], r["algorithm"]) not in dead:
-            dead[(r["case"], r["algorithm"])] = (r["p"] * r["q"], reason)
+            dead[(r["case"], r["algorithm"])] = (r["p"] * r["q"], reason, ends_size(r))
 
     def log(line):
         print(line, flush=True)
@@ -282,7 +303,7 @@ def sweep(args):
             f.write(line + "\n")
 
     log(f"== {datetime.now().isoformat(timespec='seconds')} on {platform.node()}: sizes {sizes}, seeds {seeds} "
-        f"(at {seeds_at}), cases {cases}, timeout {timeout} s, SPICE up to {spice_max}")
+        f"(at {seeds_at}), cases {cases}, timeout {timeout} s, runtime cap {runtime_cap} s, SPICE up to {spice_max}")
     for p, q in sizes:
         for seed in range(seeds_at.get((p, q), seeds)):
             for case in cases:
@@ -292,8 +313,9 @@ def sweep(args):
                         continue
                     reason = None
                     if (case, solver.name) in dead:
-                        cells, why = dead[(case, solver.name)]
-                        reason = f"{why} at {int(cells ** 0.5)}x{int(cells ** 0.5)}" if cells <= p * q else None
+                        cells, why, same_size = dead[(case, solver.name)]
+                        reason = (f"{why} at {int(cells ** 0.5)}x{int(cells ** 0.5)}"
+                                  if cells < p * q or (same_size and cells == p * q) else None)
                     if is_spice(solver.name) and spice_max is not None and p * q > spice_max[0] * spice_max[1]:
                         reason = f"above --spice-max-size {spice_max[0]}x{spice_max[1]}"
                     if not reason and (p, q) in limits:
@@ -311,7 +333,12 @@ def sweep(args):
                             log(f"{case:<13} {solver.name:<29} {p}x{q} seed={seed}: skipped ({reason})")
                         continue
                     pickle_path = out_dir / "pickles" / f"{case}_{solver.name}_{p}x{q}_seed{seed}.pkl"
-                    rec = run_isolated(solver, p, q, seed, CASES[case], pickle_path, timeout)
+                    rec = run_isolated(solver, p, q, seed, CASES[case], pickle_path, timeout, runtime_cap)
+                    if runtime_cap is not None and rec["runtime"] is not None and rec["runtime"] > runtime_cap:
+                        rec["history"].update(converged_after=rec["runtime"] if rec["status"] == CONVERGED else None,
+                                              runtime_cap=runtime_cap)
+                        rec.update(status=TIMEOUT, error=f"runtime {rec['runtime']:.1f} s, over the runtime cap "
+                                                         f"{runtime_cap:g} s ({rec['status']})")
                     rec.update(case=case, machine=platform.node(), costs=run_costs(rec))
                     records.append(rec)
                     with open(runs_path, "a") as f:
@@ -320,7 +347,7 @@ def sweep(args):
                         os.fsync(f.fileno())
                     reason = failure_reason(rec)
                     if skip and reason and (case, solver.name) not in dead:
-                        dead[(case, solver.name)] = (p * q, reason)
+                        dead[(case, solver.name)] = (p * q, reason, ends_size(rec))
                     runtime = "-" if rec["runtime"] is None else f"{rec['runtime']:9.3f}s"
                     its = rec["iterations"] if rec["iterations"] is not None else rec["costs"]["iterations_run"]
                     log(f"{case:<13} {solver.name:<29} {p}x{q} seed={seed}: {rec['status']:<13} {runtime} its={its}"
@@ -559,6 +586,11 @@ def main():
     sw.add_argument("--reference-dir", type=Path,
                     help="another sweep of the same circuits whose SPICE solutions the agreement check may use")
     sw.add_argument("--timeout", type=float, default=6 * 3600, help="seconds before a run is killed")
+    sw.add_argument("--runtime-cap", type=float,
+                    help="seconds into its timed solve before a run is killed and recorded as a timeout")
+    sw.add_argument("--skip-seeds-after-timeout", nargs="*", metavar="SOLVER",
+                    help="after a timeout of these solvers (full names; all if none given), skip their other seeds at "
+                         "that size too, not only larger sizes")
     sw.add_argument("--max-iterations", type=int, default=MAX_ITERATIONS, help="Spingarn's iteration cap")
     sw.add_argument("--spice-max-size", type=parse_size, help="skip SPICE above this size")
     sw.add_argument("--runtime-limit-at", nargs="*", type=parse_limit_at, default=[], metavar="SIZE=SECONDS",

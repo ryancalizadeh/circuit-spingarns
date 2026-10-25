@@ -1,13 +1,12 @@
 % Peak memory vs array size: the peak working set of the process each run executed in (Python, numpy and, for SPICE,
-% ngspice included; ~0.1 GB at the smallest sizes is that baseline). Medians over 3 seeds. Needs
+% ngspice included; ~0.1 GB at the smallest sizes is that baseline). Medians over converged runs of 10 seeds. Needs
 % network_models_style.tex; data memory.csv (GB).
 \begin{tikzpicture}
 \begin{groupplot}[group style={nm group style}, nm axis, ylabel={peak memory (GB)},
-  ymin=0.05, ymax=40, ytick={0.1,1,10}, yticklabels={0.1,1,10}]
+  ymin=0.05, ymax=20, ytick={0.1,1,10}, yticklabels={0.1,1,10}]
 \nextgroupplot[title={Memristor}, legend to name=nmMemoryLegend, nm legend]
-  \addplot[nm spice]     table[nm csv, y=mem_spice]  {\NMdata/memory.csv}; \addlegendentry{SPICE (ngspice, KLU)}
-  \addplot[nm zero bias] table[nm csv, y=mem_zb]     {\NMdata/memory.csv}; \addlegendentry{Spingarn, zero-bias $\gamma$}
-  \addplot[nm sector]    table[nm csv, y=mem_sector] {\NMdata/memory.csv}; \addlegendentry{Spingarn, sector $\gamma$}
+  \addplot[nm spice]     table[nm csv, y=mem_spice] {\NMdata/memory.csv}; \addlegendentry{SPICE (ngspice, KLU)}
+  \addplot[nm zero bias] table[nm csv, y=mem_zb]    {\NMdata/memory.csv}; \addlegendentry{Spingarn, zero-bias $\gamma$}
 \nextgroupplot[title={1D1R, ideal diode}]
   \addplot[nm spice]     table[nm csv, y=ideal_spice] {\NMdata/memory.csv};
   \addplot[nm zero bias] table[nm csv, y=ideal_zb]    {\NMdata/memory.csv};

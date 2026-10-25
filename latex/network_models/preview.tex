@@ -1,9 +1,11 @@
-% Preview of the network-models figures on a thesis-width page (15.5 cm text). Compile twice (the shared legends use
-% `legend to name`):  pdflatex preview && pdflatex preview
+% SPICE vs Spingarn on three crossbar models: the tables and figures on a thesis-width page (15.5 cm text).
+% Compile twice (the shared legends use `legend to name`):  pdflatex preview && pdflatex preview
 % In a LaTeX project: copy this folder, \input{network_models_style} in the preamble (after pgfplots and groupplots;
-% define \NMdata first if the CSVs are not next to the main file), and \input{fig_...} inside a figure environment.
+% define \NMdata first if the CSVs are not next to the main file), \input{fig_...} inside a figure environment and
+% \input{table_...} inside a table environment (needs booktabs).
 \documentclass[11pt]{article}
 \usepackage[a4paper, textwidth=15.5cm, top=2cm, bottom=2cm]{geometry}
+\usepackage{booktabs}
 \usepackage{pgfplots}
 \usepgfplotslibrary{groupplots}
 \pgfplotsset{compat=1.18}
@@ -11,43 +13,95 @@
 
 \begin{document}
 
+\section*{SPICE vs Spingarn on three crossbar models}
+
+\paragraph{Setup.}
+Each case is an $N\times N$ crossbar with source voltages $E\in[-1, 1.5]$\,V, per-cell $R_{\min}$ log-uniform in
+1--10\,k$\Omega$ and $R_{\max}$ in 50--200\,k$\Omega$, 5\,$\Omega$ wires, 50\,$\Omega$ sources and 1\,k$\Omega$ loads.
+The cell is a tanh memristor alone (\emph{memristor}), or a memristor in series with an ideal or a Shockley diode
+($I_s = 10^{-9}$\,A, $n = 1$) on a branch of its own through an internal node (\emph{1D1R}). Every size has ten random
+circuits (seeds 0--9), solved by both solvers. SPICE is ngspice-47 with KLU and RELTOL $10^{-3}$; it writes the ideal
+diode as $\mathrm{uramp}(V)/1\,\mathrm{m\Omega}$ and the Shockley diode as a behavioural $\exp$ source. Spingarn keeps
+its port resistances fixed (no adaptive re-matching) and factorizes with CHOLMOD in its own (AMD) ordering, with
+$\alpha = 1$ on the memristor and $0.8$ on 1D1R; zero-bias $\gamma = R_{\min}$ per memristor and, on 1D1R, the diode
+port $\sqrt{R_{\min}R_{\max}}$ per cell. Both stop on the same KCL test. Each run executed in its own process on one
+machine (Intel i5-11600KF, 31.8\,GB, single-threaded BLAS); runtime is the whole solve. A run still solving after
+1600\,s was stopped and counts as failed to converge within the time limit. SPICE was not run at $1024\times1024$,
+where ngspice's KLU fails on these circuits regardless of time.
+
+\paragraph{Results} (medians over the ten circuits; Tables~1--2, Figures~1--5).
+\begin{itemize}
+  \item \emph{Memristor.} SPICE converged by plain Newton in 5 iterations at every size; Spingarn's median stayed at 19--22
+  iterations at every size up to $1024\times1024$. Spingarn was faster at every size: 3.9$\times$ at
+  $16\times16$, 12$\times$ at $512\times512$ (3.69 against 44.2\,s; 0.72 against 3.09\,GB), and solved
+  $1024\times1024$ in 15.9\,s (range 15.5--16.3\,s, 2.83\,GB).
+  \item \emph{1D1R, ideal diode.} SPICE took a median of 8--16 Newton iterations, plain Newton in 59 of its 60 runs (one
+  $16\times16$ circuit needed gmin stepping). Spingarn's iterations stay at 113--130 up to $128\times128$ and then grow
+  about threefold per doubling of $N$ (170, 496, 1596 at 256, 512, 1024). It ties SPICE at $16\times16$ and is
+  3.1$\times$ faster at 256 and 512 (90.6 against 279\,s; 0.98 against 4.59\,GB); at $1024\times1024$ it took
+  1169\,s (1144--1233\,s), every run within the cap.
+  \item \emph{1D1R, Shockley diode.} SPICE needed gmin stepping on every run (medians of 78--94 iterations) and was 1.4$\times$
+  slower than Spingarn at $16\times16$, 35$\times$ slower at $256\times256$ (284 against 8.2\,s; 4.6 against
+  0.30\,GB). On one $128\times128$ circuit ngspice reported success after 1255 iterations of gmin stepping, but its
+  operating point failed the KCL test (relative residual $2.6\times10^{-3}$, above RELTOL), so it counts as not
+  converged. At $512\times512$ the first circuit was still unsolved at the 1600\,s cap; KLU's reordering had taken the
+  process to a peak of at least 19\,GB of RAM and 27\,GB committed, leaving the 32\,GB machine almost without free
+  memory, so the other nine circuits were not run. Spingarn took the same iterations as with the ideal diode (158,
+  486, 1610 at 256, 512, 1024): 110\,s at $512\times512$, at least 14.6$\times$ faster than SPICE, and 1445\,s
+  (1418--1479\,s) at $1024\times1024$, every run within the cap.
+  \item \emph{Agreement.} The two solvers' word- and bit-line potentials differ by at most $1.2\times10^{-10}$\,V on the
+  memristor and $2.2\times10^{-7}$\,V on the ideal diode (SPICE's $1\,\mathrm{m\Omega}$ diode). On the Shockley diode
+  they agree to $7.5\times10^{-8}$\,V or better except on two circuits where SPICE stopped with a looser KCL residual
+  (within RELTOL), $6.6\times10^{-7}$ and $7.8\times10^{-6}$\,V.
+\end{itemize}
+
+\begin{table}[p]
+  \centering\small
+  \input{table_runtime}
+  \caption{Median runtime (s) over ten circuits, and SPICE's median over Spingarn's (ratio $> 1$: Spingarn faster).
+  A superscript $k/m$: only $k$ of the $m$ runs converged (a run stopped at the 1600\,s cap counts as slower than all
+  converged runs in the median). $>$1600: the run hit the cap. --: not run.}
+\end{table}
+
+\begin{table}[p]
+  \centering\small
+  \input{table_iterations}
+  \caption{Median iterations over ten circuits: Spingarn's, and SPICE's Newton iterations including fallback stages
+  (gmin stepping). t/o: the run hit the 1600\,s cap.}
+\end{table}
+
 \begin{figure}[p]
   \centering
   \input{fig_runtime}
-  \caption{Runtime against array size for SPICE (ngspice-47, KLU) and Spingarn with fixed port resistances
-  ($\alpha = 1$ on the memristor, $0.8$ on 1D1R; CHOLMOD with AMD ordering), median over three random circuits.
-  Zero-bias $\gamma$: $\gamma = R_{\min}$ per memristor; sector $\gamma$: $\sqrt{R_{\min}R_{\max}}$. On 1D1R the diode
-  is on its own branch with port resistance $\sqrt{R_{\min}R_{\max}}$. SPICE writes the ideal diode as
-  $\mathrm{uramp}(V)/1\,\mathrm{m\Omega}$ and the Shockley diode ($I_s = 10^{-9}$\,A, $n = 1$) as a behavioural
-  $\exp$ source; on that case every SPICE run needed gmin stepping, and its $512\times512$ point is a single run.
-  SPICE was not run at $1024\times1024$, where ngspice's KLU fails.}
+  \caption{Runtime against array size, median over ten random circuits, bars from the fastest to the slowest
+  converged run. Dashed: the 1600\,s cap; a cross marks a size where SPICE hit it.}
 \end{figure}
 
 \begin{figure}[p]
   \centering
   \input{fig_speedup}
-  \caption{SPICE's runtime divided by Spingarn's, from the medians of the runtime figure.}
+  \caption{SPICE's median runtime divided by Spingarn's. Where SPICE hit the cap, the open triangle is the lower bound
+  $1600\,\mathrm{s}$ over Spingarn's median.}
 \end{figure}
 
 \begin{figure}[p]
   \centering
   \input{fig_iterations}
-  \caption{Iterations: Spingarn's, and SPICE's Newton iterations including fallback stages (gmin stepping).}
+  \caption{Iterations: Spingarn's, and SPICE's Newton iterations including fallback stages (gmin stepping), median
+  and range over ten circuits.}
 \end{figure}
 
 \begin{figure}[p]
   \centering
   \input{fig_per_iteration}
   \caption{Time per iteration, one-time costs (netlist load and KLU reordering; Spingarn's assembly and
-  factorization) excluded. On the memristor the two Spingarn variants coincide: they factorize the same matrix
-  and do the same work per iteration.}
+  factorization) excluded; median over converged runs.}
 \end{figure}
 
 \begin{figure}[p]
   \centering
   \input{fig_memory}
-  \caption{Peak memory of the process each run executed in. On the memristor the two Spingarn variants
-  coincide.}
+  \caption{Peak memory of the process each run executed in, median over converged runs.}
 \end{figure}
 
 \end{document}

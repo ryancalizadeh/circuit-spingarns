@@ -1,18 +1,30 @@
-% Runtime vs array size, SPICE vs Spingarn on the three crossbar models: medians over 3 seeds, the PC (DESKTOP-EFQTE92).
-% Needs network_models_style.tex; data runtime.csv (s; _min/_max/_n columns beside each median).
+% Runtime vs array size, SPICE vs Spingarn on the three crossbar models: medians over 10 seeds with min-max bars, the PC
+% (DESKTOP-EFQTE92). A timed-out run counts as above the cap in the median; where half or more timed out the median is
+% missing and a cross marks the cap. Needs network_models_style.tex; data runtime.csv (s).
 \begin{tikzpicture}
 \begin{groupplot}[group style={nm group style}, nm axis, ylabel={runtime (s)},
-  ymin=1e-3, ymax=5e3, ytick={1e-3,1e-2,1e-1,1,1e1,1e2,1e3}]
+  ymin=1e-3, ymax=1e4, ytick={1e-3,1e-2,1e-1,1,1e1,1e2,1e3,1e4}]
 \nextgroupplot[title={Memristor}, legend to name=nmRuntimeLegend, nm legend]
-  \addplot[nm spice]     table[nm csv, y=mem_spice]  {\NMdata/runtime.csv}; \addlegendentry{SPICE (ngspice, KLU)}
-  \addplot[nm zero bias] table[nm csv, y=mem_zb]     {\NMdata/runtime.csv}; \addlegendentry{Spingarn, zero-bias $\gamma$}
-  \addplot[nm sector]    table[nm csv, y=mem_sector] {\NMdata/runtime.csv}; \addlegendentry{Spingarn, sector $\gamma$}
+  \addplot[nm spice, nm bars]     table[nm csv, y=mem_spice, nm range=mem_spice] {\NMdata/runtime.csv};
+    \addlegendentry{SPICE (ngspice, KLU)}
+  \addplot[nm zero bias, nm bars] table[nm csv, y=mem_zb, nm range=mem_zb]       {\NMdata/runtime.csv};
+    \addlegendentry{Spingarn, zero-bias $\gamma$}
+  \addlegendimage{nm cap}\addlegendentry{\NMcap\,s runtime cap}
+  \addplot[nm cap, domain=12:1400, samples=2] {\NMcap};
+  \addplot[nm timeout=nmSpice]    table[nm csv, y=mem_spice_capped] {\NMdata/runtime.csv};
+  \addplot[nm timeout=nmZeroBias] table[nm csv, y=mem_zb_capped]    {\NMdata/runtime.csv};
 \nextgroupplot[title={1D1R, ideal diode}]
-  \addplot[nm spice]     table[nm csv, y=ideal_spice] {\NMdata/runtime.csv};
-  \addplot[nm zero bias] table[nm csv, y=ideal_zb]    {\NMdata/runtime.csv};
+  \addplot[nm spice, nm bars]     table[nm csv, y=ideal_spice, nm range=ideal_spice] {\NMdata/runtime.csv};
+  \addplot[nm zero bias, nm bars] table[nm csv, y=ideal_zb, nm range=ideal_zb]       {\NMdata/runtime.csv};
+  \addplot[nm cap, domain=12:1400, samples=2] {\NMcap};
+  \addplot[nm timeout=nmSpice]    table[nm csv, y=ideal_spice_capped] {\NMdata/runtime.csv};
+  \addplot[nm timeout=nmZeroBias] table[nm csv, y=ideal_zb_capped]    {\NMdata/runtime.csv};
 \nextgroupplot[title={1D1R, Shockley diode}]
-  \addplot[nm spice]     table[nm csv, y=shockley_spice] {\NMdata/runtime.csv};
-  \addplot[nm zero bias] table[nm csv, y=shockley_zb]    {\NMdata/runtime.csv};
+  \addplot[nm spice, nm bars]     table[nm csv, y=shockley_spice, nm range=shockley_spice] {\NMdata/runtime.csv};
+  \addplot[nm zero bias, nm bars] table[nm csv, y=shockley_zb, nm range=shockley_zb]       {\NMdata/runtime.csv};
+  \addplot[nm cap, domain=12:1400, samples=2] {\NMcap};
+  \addplot[nm timeout=nmSpice]    table[nm csv, y=shockley_spice_capped] {\NMdata/runtime.csv};
+  \addplot[nm timeout=nmZeroBias] table[nm csv, y=shockley_zb_capped]    {\NMdata/runtime.csv};
 \end{groupplot}
 \node[anchor=south, yshift=2pt] at (group c2r1.outer north) {\pgfplotslegendfromname{nmRuntimeLegend}};
 \end{tikzpicture}

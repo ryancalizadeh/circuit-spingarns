@@ -9,6 +9,10 @@ no one-hour rule; no 768; SPICE's Shockley diode as a behavioural exp source (`s
 CSVs and pgfplots code: latex/network_models/ (regenerate with `python network_models_latex.py`). Findings:
 memory/shockley-separate-findings.md, memory/network-models-findings.md.
 
+**Rerun 2026-10-24/25 (PC):** the user asked for fresh data, 10 seeds, zero-bias only on case 1, and a 1600 s runtime
+cap per run. Data: results/network-models-10seeds/; latex/network_models/ now holds this rerun (the 3-seed version is
+in git history); findings: memory/network-models-10seeds-findings.md.
+
 ## 1. The task (from the user)
 
 Compare SPICE against Spingarn on three cases:

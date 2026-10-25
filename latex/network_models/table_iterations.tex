@@ -1,0 +1,18 @@
+% Median iterations over 10 seeds (SPICE: ngspice's Newton iterations, fallback stages included); written by
+% network_models_latex.py. t/o: half or more of the runs hit the cap; superscripts and -- as in
+% table_runtime.tex. Needs booktabs.
+\begin{tabular}{rrrrrrr}
+\toprule
+ & \multicolumn{2}{c}{Memristor} & \multicolumn{2}{c}{1D1R, ideal diode} & \multicolumn{2}{c}{1D1R, Shockley diode} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
+$N$ & SPICE & Spingarn & SPICE & Spingarn & SPICE & Spingarn \\
+\midrule
+16 & 5 & 22 & 8 & 113 & 94 & 110 \\
+32 & 5 & 20 & 8 & 124 & 82 & 114 \\
+64 & 5 & 19 & 9 & 130 & 78 & 115 \\
+128 & 5 & 20 & 10 & 129 & 88\textsuperscript{9/10} & 115 \\
+256 & 5 & 20 & 12 & 170 & 88 & 158 \\
+512 & 5 & 20 & 16 & 496 & t/o & 486 \\
+1024 & -- & 20 & -- & 1596 & -- & 1610 \\
+\bottomrule
+\end{tabular}

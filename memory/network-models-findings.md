@@ -38,7 +38,8 @@ ms/it was ~20% session noise (network solve and check slower, same code); median
 
 Three-model comparison, 2026-10-19 (the user's task in instructions.md: memristor, ideal separate, Shockley separate; fixed
 Gamma, AMD, alpha 1/0.8, to 1024): memristor reused from network-models-1, ideal case = sweep B + the 1024 seeds above,
-Shockley case in [[shockley-separate-findings]]. CSVs + pgfplots in latex/network_models/. For this task the user dropped
+Shockley case in [[shockley-separate-findings]]. CSVs + pgfplots were in latex/network_models/, replaced 2026-10-25 by
+the 10-seed rerun ([[network-models-10seeds-findings]]). For this task the user dropped
 the one-hour rule at 1024 (nothing in it projected over an hour anyway) and declined 768x768; whether the rule stands for
 future sweeps is open, so ask.
 

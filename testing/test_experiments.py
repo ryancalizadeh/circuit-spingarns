@@ -11,7 +11,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from algorithms.common import Solver, SolveOutput
 from plotting import make_plots
-from run_experiments import parse_size, run_sweep
+from run_experiments import parse_size, run_isolated, run_sweep
 
 
 class FakeConverging(Solver):
@@ -53,6 +53,35 @@ class FakeHang(Solver):
 
     def solve(self, cfg):
         time.sleep(600)
+
+
+class FakeSlowStart(Solver):
+    """Slow on the warm-up circuit (2 x 2, see run_experiments.warm_up), then solve_time seconds on the real one."""
+    name = "fake_slow_start"
+    solve_time = 1.0
+
+    def solve(self, cfg):
+        time.sleep(4.0 if cfg.p == 2 else self.solve_time)
+        z = np.zeros(cfg.num_branches)
+        return SolveOutput(z, z, True, 1)
+
+
+class FakeSlowStartHang(FakeSlowStart):
+    name = "fake_slow_start_hang"
+    solve_time = 600.0
+
+
+def test_runtime_cap_counts_the_solve_only():
+    # a 4 s warm-up and a 1 s solve stay under a 3 s cap: start-up, warm-up and circuit generation are not charged
+    ok = run_isolated(FakeSlowStart(), 3, 3, 0, {}, None, timeout=120, runtime_cap=3)
+    assert ok["status"] == "converged" and 1.0 <= ok["runtime"] < 3
+    start = time.perf_counter()
+    capped = run_isolated(FakeSlowStartHang(), 3, 3, 0, {}, None, timeout=120, runtime_cap=3)
+    assert capped["status"] == "timeout" and capped["history"]["runtime_cap"] == 3
+    assert "runtime cap" in capped["error"] and 7 <= time.perf_counter() - start < 60
+    # the overall timeout still binds when it comes first, and is not reported as the cap
+    hung = run_isolated(FakeSlowStartHang(), 3, 3, 0, {}, None, timeout=6, runtime_cap=100)
+    assert hung["status"] == "timeout" and "runtime_cap" not in hung["history"] and "after 6" in hung["error"]
 
 
 def test_parse_size():

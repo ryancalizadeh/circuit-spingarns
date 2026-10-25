@@ -1,23 +1,23 @@
-% Styles for the SPICE vs Spingarn figures fig_runtime.tex, fig_iterations.tex, fig_memory.tex and fig_speedup.tex.
-% Needs \usepackage{pgfplots} and \usepgfplotslibrary{groupplots} (compat 1.18 tested). \input this file once in the
-% preamble, then \input each figure inside a figure environment (preview.tex does both).
+% Styles for the SPICE vs Spingarn figures fig_runtime.tex, fig_speedup.tex, fig_iterations.tex, fig_per_iteration.tex
+% and fig_memory.tex. Needs \usepackage{pgfplots} and \usepgfplotslibrary{groupplots} (compat 1.18 tested). \input this
+% file once in the preamble, then \input each figure inside a figure environment (preview.tex does both).
 %
 % Data: the CSVs written by `python network_models_latex.py` (repo root), one row per array size N (N x N) and one column
-% per series, with _min, _max and _n (converged runs) beside each median; nan where no run converged, which pgfplots
-% leaves out. Series: mem_{spice,zb,sector} (memristor alone), ideal_{spice,zb} (1D1R, ideal diode on its own branch),
-% shockley_{spice,zb} (1D1R, Shockley diode on its own branch). zb is Spingarn with gamma = R_min on the memristors and,
-% on 1D1R, the diode port sqrt(R_min R_max); sector is gamma = sqrt(R_min R_max) on the memristors.
+% per series, with _min, _max and _n (converged runs) beside each median; nan where no median exists, which pgfplots
+% leaves out. runtime.csv and iterations.csv also hold _runs, _timeout and _capped (the 1600 s cap where half or more of
+% the runs timed out, else nan). Series: mem_{spice,zb} (memristor alone), ideal_{spice,zb} (1D1R, ideal diode on its
+% own branch), shockley_{spice,zb} (1D1R, Shockley diode on its own branch). zb is Spingarn with gamma = R_min on the
+% memristors and, on 1D1R, the diode port sqrt(R_min R_max).
 %
 % \NMdata is the folder holding the CSVs, relative to the main .tex file; define it before \input-ing this file if the
 % CSVs are elsewhere, e.g. \newcommand\NMdata{figures/network_models}.
 \providecommand\NMdata{.}
+\providecommand\NMcap{1600}% the runtime cap of the sweeps, in seconds
 
-% Series colours from the repo's plotting.py (spice slot 1, spingarn slot 0, spingarn_sector slot 2), checked with the
-% dataviz palette validator on white (all pairs pass CVD and normal vision). The teal is below 3:1 against white, so
-% every series also has its own marker.
+% Series colours from the repo's plotting.py (spice slot 1, spingarn slot 0), checked with the dataviz palette validator
+% on white (the pair passes CVD and normal vision). Each series also has its own marker.
 \definecolor{nmSpice}{HTML}{EB6834}
 \definecolor{nmZeroBias}{HTML}{2A78D6}
-\definecolor{nmSector}{HTML}{1BAF7A}
 \definecolor{nmInk}{HTML}{52514E}
 \definecolor{nmGrid}{HTML}{E6E5E0}
 
@@ -27,7 +27,20 @@
   nm series/.style={color=#1, line width=1pt, mark options={fill=#1, draw=white, line width=0.4pt, solid}},
   nm spice/.style={nm series=nmSpice, mark=*, mark size=2pt},
   nm zero bias/.style={nm series=nmZeroBias, mark=square*, mark size=1.8pt},
-  nm sector/.style={nm series=nmSector, mark=triangle*, mark size=2.4pt},
+  % min-max over the seeds as error bars:
+  %   \addplot[nm spice, nm bars] table[nm csv, y=mem_spice, nm range=mem_spice] {\NMdata/runtime.csv};
+  nm bars/.style={error bars/.cd, y dir=both, y explicit, error bar style={line width=0.6pt, solid},
+    error mark options={rotate=90, mark size=1.6pt, line width=0.6pt}},
+  table/nm range/.style={y error plus expr=\thisrow{#1_max}-\thisrow{#1},
+    y error minus expr=\thisrow{#1}-\thisrow{#1_min}},
+  % a run over the cap: a cross at the cap, labelled; \addplot[nm timeout=nmSpice] table[nm csv, y=X_capped] {...};
+  nm timeout/.style={only marks, mark=x, mark size=3.2pt, line width=1.3pt, color=#1, forget plot,
+    nodes near coords={timed out}, every node near coord/.append style={font=\scriptsize, text=#1, anchor=south east,
+    xshift=-1pt}},
+  nm cap/.style={draw=nmInk!70, line width=0.6pt, dash pattern=on 3pt off 2pt, forget plot},
+  % a lower bound on the speedup (SPICE over the cap): an open triangle in Spingarn's colour
+  nm bound/.style={only marks, mark=triangle, mark size=2.8pt, color=nmZeroBias,
+    mark options={draw=nmZeroBias, fill=white, line width=0.9pt, solid}},
   nm reference/.style={draw=nmInk!55, line width=0.6pt, dashed, forget plot},
   % one panel; width/height are per panel (three panels plus labels fill ~15.5 cm)
   nm axis/.style={
